@@ -21,15 +21,15 @@ import { getPanBounds, includePanOffset } from "./canvas-pan";
 import packageJson from "../../../package.json";
 
 const TOOLS: readonly PaintTool[] = [
-  RectSelectionTool,
-  MoveTool,
   PencilTool,
   EraserTool,
-  ColorPickerTool,
-  MagnifierTool,
-  ShapeTool,
-  LineTool,
   BucketTool,
+  ColorPickerTool,
+  LineTool,
+  ShapeTool,
+  RectSelectionTool,
+  MoveTool,
+  MagnifierTool,
 ] as const;
 
 const PALETTE_THEMES: readonly PaletteTheme[] = PixelPencilPalettes;
@@ -3249,8 +3249,8 @@ export function PixelPencil() {
   return (
     <>
       <div className="flex h-screen flex-col overflow-hidden bg-zinc-950 text-zinc-50">
-        <section className="border-b border-zinc-900 px-3 py-3 md:px-8" aria-label="General actions">
-          <div className="flex flex-wrap items-center justify-start gap-3">
+        <section className="shrink-0 overflow-x-auto border-b border-zinc-900 px-3 py-3 md:px-8" aria-label="General actions">
+          <div className="flex w-max min-w-full flex-nowrap items-center justify-start gap-3 [&>button]:shrink-0">
             <button
               type="button"
               onClick={undo}
@@ -3459,7 +3459,7 @@ export function PixelPencil() {
                 Palette
               </button>
             </nav>
-            <section className="border-t border-zinc-900 px-4 py-2 md:px-6" aria-label="Tools">
+            <section className="shrink-0 overflow-x-auto border-t border-zinc-900 px-4 py-2 md:px-6" aria-label="Tools">
               <div className="mx-auto max-w-4xl">
                 <Toolbox tools={TOOLS} selectedToolId={tool} onSelect={setTool} />
               </div>
