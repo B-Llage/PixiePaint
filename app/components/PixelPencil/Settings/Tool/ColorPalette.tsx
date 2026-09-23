@@ -17,7 +17,7 @@ export function ColorPalette({ paletteColors, setActiveColor, drawValueRef }: Pa
                         key={color}
                         type="button"
                         aria-label={`Use color ${color}`}
-                        className="flex h-9 w-9 items-center justify-center rounded-full border border-zinc-300 transition-all hover:scale-105 focus:outline-none focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:border-zinc-700 dark:focus-visible:ring-white dark:focus-visible:ring-offset-black"
+                        className="flex h-7 w-7 items-center justify-center rounded-full border border-zinc-300 transition-all hover:scale-105 focus:outline-none focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:border-zinc-700 dark:focus-visible:ring-white dark:focus-visible:ring-offset-black"
                         style={{
                             backgroundColor: isTransparent ? "transparent" : color,
                             backgroundImage: isTransparent
@@ -37,11 +37,11 @@ export function ColorPalette({ paletteColors, setActiveColor, drawValueRef }: Pa
     );
 
     return (
-        <div className="flex flex-col gap-3">
-            <span className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+        <div>
+            <span className="sr-only">
                 Palette
             </span>
-            <div className="flex flex-wrap gap-3">{paletteButtons}</div>
+            <div className="flex flex-wrap gap-1">{paletteButtons}</div>
         </div>
     );
 }

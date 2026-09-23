@@ -6,6 +6,19 @@ interface ChangelogModalProps {
 
 const CHANGELOG_ENTRIES = [
   {
+    version: "v0.3.0",
+    title: "Canvas and Workflow Improvements",
+    changes: [
+      "Move artwork or selections with the new Move tool, with optional automatic layer picking.",
+      "Rename layers by double-clicking their names.",
+      "Pan with two-finger scrolling or a middle-button drag, and zoom around the cursor with pinch, wheel, or magnifier controls.",
+      "Create custom colors with hue, saturation, and lightness sliders.",
+      "Type or drag to set brush sizes from 1 to 256 pixels, with an on-canvas size preview.",
+      "Open Layers and Palette in mobile sheets without changing the canvas size.",
+      "See paint previews at their final color, or enable Dim Stroke Preview in Settings.",
+    ],
+  },
+  {
     version: "v0.2.1",
     title: "Maintenance Update",
     changes: [

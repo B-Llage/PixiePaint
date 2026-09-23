@@ -2,8 +2,11 @@
 
 import {
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
+  type KeyboardEvent,
   type MouseEvent,
   type DragEvent,
 } from "react";
@@ -14,6 +17,7 @@ interface LayersPanelProps {
   onSelectLayer: (id: string) => void;
   onCreateLayer: () => void;
   onDeleteLayer: (id: string) => void;
+  onRenameLayer: (id: string, name: string) => void;
   onToggleVisibility: (id: string) => void;
   onReorderLayers: (fromIndex: number, toIndex: number) => void;
   layerPreviews: Record<string, string | undefined>;
@@ -25,13 +29,50 @@ export function LayersPanel({
   onSelectLayer,
   onCreateLayer,
   onDeleteLayer,
+  onRenameLayer,
   onToggleVisibility,
   onReorderLayers,
   layerPreviews,
 }: LayersPanelProps) {
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const cancelRenameRef = useRef(false);
   const canDeleteLayer = layers.length > 1;
+
+  useEffect(() => {
+    if (editingLayerId) {
+      nameInputRef.current?.focus();
+      nameInputRef.current?.select();
+    }
+  }, [editingLayerId]);
+
+  const commitRename = useCallback(() => {
+    if (!editingLayerId || cancelRenameRef.current) return;
+    const name = draftName.trim();
+    const layer = layers.find((item) => item.id === editingLayerId);
+    setEditingLayerId(null);
+    if (layer && name && name !== layer.name) {
+      onRenameLayer(editingLayerId, name);
+    }
+  }, [draftName, editingLayerId, layers, onRenameLayer]);
+
+  const handleNameKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commitRename();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        cancelRenameRef.current = true;
+        setEditingLayerId(null);
+      }
+    },
+    [commitRename],
+  );
 
   const orderedLayers = useMemo(
     () => [...layers].reverse(),
@@ -45,11 +86,15 @@ export function LayersPanel({
 
   const handleDragStart = useCallback(
     (event: DragEvent<HTMLLIElement>, id: string) => {
+      if (editingLayerId === id) {
+        event.preventDefault();
+        return;
+      }
       setDraggedId(id);
       event.dataTransfer.setData("text/plain", id);
       event.dataTransfer.effectAllowed = "move";
     },
-    [],
+    [editingLayerId],
   );
 
   const handleDragEnd = useCallback(() => {
@@ -131,7 +176,7 @@ export function LayersPanel({
         return (
           <li
             key={layer.id}
-            draggable
+            draggable={editingLayerId !== layer.id}
             onDragStart={(event) => handleDragStart(event, layer.id)}
             onDragOver={(event) => handleDragOver(event, layer.id)}
             onDragLeave={(event) => handleDragLeave(event, layer.id)}
@@ -148,7 +193,8 @@ export function LayersPanel({
             <button
               type="button"
               onClick={() => onSelectLayer(layer.id)}
-              className="flex flex-1 items-center justify-start gap-3 text-left"
+              className="flex-shrink-0"
+              aria-label={`Select ${layer.name}`}
             >
               <div
                 className={`relative h-10 w-10 flex-shrink-0 overflow-hidden rounded border border-zinc-300 dark:border-zinc-600 ${layer.visible ? "" : "opacity-50"}`}
@@ -168,8 +214,34 @@ export function LayersPanel({
                   />
                 ) : null}
               </div>
-              <span className="truncate">{layer.name}</span>
             </button>
+            {editingLayerId === layer.id ? (
+              <input
+                ref={nameInputRef}
+                type="text"
+                value={draftName}
+                onChange={(event) => setDraftName(event.target.value)}
+                onKeyDown={handleNameKeyDown}
+                onBlur={commitRename}
+                onDragStart={(event) => event.preventDefault()}
+                className="min-w-0 flex-1 rounded border border-zinc-400 bg-white px-1 py-0.5 text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-black dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:ring-white"
+                aria-label={`Rename ${layer.name}`}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => onSelectLayer(layer.id)}
+                onDoubleClick={() => {
+                  cancelRenameRef.current = false;
+                  setEditingLayerId(layer.id);
+                  setDraftName(layer.name);
+                }}
+                className="min-w-0 flex-1 truncate text-left"
+                title="Double-click to rename"
+              >
+                {layer.name}
+              </button>
+            )}
             <input
               type="checkbox"
               checked={layer.visible}

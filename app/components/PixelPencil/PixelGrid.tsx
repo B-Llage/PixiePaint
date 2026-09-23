@@ -1,21 +1,21 @@
 import {
+  Dispatch,
   MutableRefObject,
+  SetStateAction,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import type {
-  PointerEvent as ReactPointerEvent,
-  WheelEvent as ReactWheelEvent,
-} from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 
 import {
   TRANSPARENT_DARK,
   TRANSPARENT_LIGHT,
 } from "./PixelPencil.constants";
 import { PaletteColor, PixelValue } from "./PixelPencilTypes";
+import { clampPan, getPanBounds, includePanOffset } from "./canvas-pan";
 
 interface PixelGridProps {
   gridWidth: number;
@@ -27,18 +27,25 @@ interface PixelGridProps {
   showPixelGrid: boolean;
   checkerSize: number;
   previewToolEffects: boolean;
+  dimStrokePreview: boolean;
   bucketPreview: Set<number> | null;
   brushPreview: Set<number> | null;
+  brushSizePreview: Set<number> | null;
   pathPreview: Set<number> | null;
+  activeColor: PaletteColor;
   drawValueRef: MutableRefObject<PixelValue>;
   drawValueVersion: number;
   tool: string;
   wrapperMaxWidth: number;
   wrapperMaxHeight: number;
   canvasScroll: { x: number; y: number };
-  onScrollChange: (scroll: { x: number; y: number }) => void;
+  onScrollChange: Dispatch<SetStateAction<{ x: number; y: number }>>;
   onViewportResize: (size: { width: number; height: number }) => void;
-  onWheelZoom?: (direction: "in" | "out", focusIndex: number | null) => void;
+  onWheelZoom?: (
+    direction: "in" | "out",
+    steps: number,
+    point: { x: number; y: number },
+  ) => void;
   selectionOverlay:
     | {
         rect: { x: number; y: number; width: number; height: number };
@@ -58,6 +65,7 @@ interface PixelGridProps {
   ) => void;
   handlePointerMove: (event: ReactPointerEvent<HTMLCanvasElement>) => void;
   handlePointerUp: (event: ReactPointerEvent<HTMLCanvasElement>) => void;
+  handlePointerCancel: (event: ReactPointerEvent<HTMLCanvasElement>) => void;
   handlePointerLeave: () => void;
   onBackgroundPointerDown?: (event: ReactPointerEvent<HTMLCanvasElement>) => void;
 }
@@ -69,6 +77,26 @@ const HORIZONTAL_HANDLE_PADDING = 0;
 const SELECTION_BORDER_THICKNESS = 0.1;
 const DESK_BACKGROUND = "#18181b";
 const ZOOM_WHEEL_THRESHOLD = 60;
+const ZOOM_GESTURE_THRESHOLD = 0.15;
+
+type SafariGestureEvent = Event & {
+  scale: number;
+  clientX?: number;
+  clientY?: number;
+};
+
+function discreteWheelSteps(event: WheelEvent): number {
+  if (event.deltaX !== 0 || event.deltaY === 0) return 0;
+  if (event.deltaMode === 1) return Math.max(1, Math.round(Math.abs(event.deltaY) / 3));
+  if (event.deltaMode === 2) return Math.max(1, Math.round(Math.abs(event.deltaY)));
+
+  // Browsers expose no device type. Legacy wheelDeltaY identifies wheel notches
+  // where available; ambiguous pixel-mode events remain two-finger panning.
+  const wheelDeltaY = (event as WheelEvent & { wheelDeltaY?: number }).wheelDeltaY;
+  return wheelDeltaY && Math.abs(wheelDeltaY) >= 120 && Math.abs(wheelDeltaY) % 120 === 0
+    ? Math.abs(wheelDeltaY) / 120
+    : 0;
+}
 
 export function PixelGrid({
   gridWidth,
@@ -80,9 +108,12 @@ export function PixelGrid({
   showPixelGrid,
   checkerSize,
   previewToolEffects,
+  dimStrokePreview,
   bucketPreview,
   brushPreview,
+  brushSizePreview,
   pathPreview,
+  activeColor,
   drawValueRef,
   tool,
   wrapperMaxWidth,
@@ -97,6 +128,7 @@ export function PixelGrid({
   handlePointerEnter,
   handlePointerMove,
   handlePointerUp,
+  handlePointerCancel,
   handlePointerLeave,
   onBackgroundPointerDown,
   drawValueVersion,
@@ -107,24 +139,35 @@ export function PixelGrid({
     { locked: false, previousOverflow: "" },
   );
   const wheelZoomDeltaRef = useRef(0);
+  const gestureZoomDeltaRef = useRef(0);
+  const gestureScaleRef = useRef<number | null>(null);
+  const panGestureRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
 
   const contentWidth = Math.max(0, gridWidth * displayCellSize);
   const contentHeight = Math.max(0, gridHeight * displayCellSize);
-  const maxScrollX = Math.max(0, contentWidth - viewport.width);
-  const maxScrollY = Math.max(0, contentHeight - viewport.height);
   const needsHorizontalCenter =
     viewport.width > 0 && contentWidth > 0 && contentWidth <= viewport.width;
   const needsVerticalCenter =
     viewport.height > 0 && contentHeight > 0 && contentHeight <= viewport.height;
-  const scrollOriginX = needsHorizontalCenter ? 0 : canvasScroll.x;
-  const scrollOriginY = needsVerticalCenter ? 0 : canvasScroll.y;
+  const scrollOriginX = canvasScroll.x;
+  const scrollOriginY = canvasScroll.y;
   const renderOffsetX = needsHorizontalCenter
     ? (viewport.width - contentWidth) / 2
     : 0;
   const renderOffsetY = needsVerticalCenter
     ? (viewport.height - contentHeight) / 2
     : 0;
+  const panBoundsX = includePanOffset(
+    getPanBounds(contentWidth, viewport.width, renderOffsetX),
+    canvasScroll.x,
+  );
+  const panBoundsY = includePanOffset(
+    getPanBounds(contentHeight, viewport.height, renderOffsetY),
+    canvasScroll.y,
+  );
+  const panRangeX = panBoundsX.max - panBoundsX.min;
+  const panRangeY = panBoundsY.max - panBoundsY.min;
 
   const assignCanvasRef = useCallback(
     (node: HTMLCanvasElement | null) => {
@@ -218,37 +261,54 @@ export function PixelGrid({
 
     const viewportWidth = Math.max(1, viewport.width);
     const viewportHeight = Math.max(1, viewport.height);
-    canvas.width = Math.max(1, Math.floor(viewportWidth * devicePixelRatio));
-    canvas.height = Math.max(1, Math.floor(viewportHeight * devicePixelRatio));
+    canvas.width = Math.max(1, Math.round(viewportWidth * devicePixelRatio));
+    canvas.height = Math.max(1, Math.round(viewportHeight * devicePixelRatio));
     canvas.style.width = `${viewportWidth}px`;
     canvas.style.height = `${viewportHeight}px`;
 
-    context.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-    context.clearRect(0, 0, viewportWidth, viewportHeight);
+    const scaleX = canvas.width / viewportWidth;
+    const scaleY = canvas.height / viewportHeight;
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, canvas.width, canvas.height);
     context.fillStyle = DESK_BACKGROUND;
-    context.fillRect(0, 0, viewportWidth, viewportHeight);
+    context.fillRect(0, 0, canvas.width, canvas.height);
 
     const previewColor = drawValueRef.current;
-    const startX = Math.max(0, Math.floor(scrollOriginX / displayCellSize));
+    const hoverColor = tool === "eraser" ? null : activeColor;
+    const startX = Math.max(0, Math.floor((scrollOriginX - renderOffsetX) / displayCellSize));
     const endX = Math.min(
       gridWidth,
-      Math.ceil((scrollOriginX + viewportWidth) / displayCellSize) + 1,
+      Math.ceil((scrollOriginX - renderOffsetX + viewportWidth) / displayCellSize) + 1,
     );
-    const startY = Math.max(0, Math.floor(scrollOriginY / displayCellSize));
+    const startY = Math.max(0, Math.floor((scrollOriginY - renderOffsetY) / displayCellSize));
     const endY = Math.min(
       gridHeight,
-      Math.ceil((scrollOriginY + viewportHeight) / displayCellSize) + 1,
+      Math.ceil((scrollOriginY - renderOffsetY + viewportHeight) / displayCellSize) + 1,
     );
 
     const normalizedCheckerSize = Math.max(1, Math.floor(checkerSize));
+    // Adjacent cells must share a device-pixel edge. Fractional CSS coordinates
+    // let canvas antialias each fill independently and expose hairline seams.
+    const xEdges = Array.from({ length: Math.max(0, endX - startX + 1) }, (_, index) =>
+      Math.round(
+        ((startX + index) * displayCellSize - scrollOriginX + renderOffsetX) *
+          scaleX,
+      ),
+    );
+    const yEdges = Array.from({ length: Math.max(0, endY - startY + 1) }, (_, index) =>
+      Math.round(
+        ((startY + index) * displayCellSize - scrollOriginY + renderOffsetY) *
+          scaleY,
+      ),
+    );
     for (let y = startY; y < endY; y += 1) {
+      const cellTop = yEdges[y - startY];
+      const cellBottom = yEdges[y - startY + 1];
       for (let x = startX; x < endX; x += 1) {
-        const cellX =
-          x * displayCellSize - scrollOriginX + renderOffsetX;
-        const cellY =
-          y * displayCellSize - scrollOriginY + renderOffsetY;
-        if (cellX + displayCellSize < 0 || cellY + displayCellSize < 0) continue;
-        if (cellX > viewportWidth || cellY > viewportHeight) continue;
+        const cellLeft = xEdges[x - startX];
+        const cellRight = xEdges[x - startX + 1];
+        if (cellRight <= 0 || cellBottom <= 0) continue;
+        if (cellLeft >= canvas.width || cellTop >= canvas.height) continue;
 
         const index = y * gridWidth + x;
         const pixel = pixels[index];
@@ -261,10 +321,16 @@ export function PixelGrid({
             : TRANSPARENT_DARK;
         const isPathPreviewCell = pathPreview?.has(index) ?? false;
         const showPathPreview = previewToolEffects && isPathPreviewCell;
-        const previewValue = showPathPreview ? previewColor : null;
+        const isBucketPreviewCell = tool === "bucket" && (bucketPreview?.has(index) ?? false);
+        const isBrushPreviewCell = brushPreview?.has(index) ?? false;
+        const showHoverColor = !dimStrokePreview && !showPathPreview &&
+          (isBucketPreviewCell || isBrushPreviewCell);
+        const previewValue = showPathPreview
+          ? previewColor
+          : showHoverColor ? hoverColor : null;
         const hasPreviewFill =
           previewValue !== null && previewValue !== "transparent";
-        const cellBackgroundColor = showPathPreview
+        const cellBackgroundColor = showPathPreview || showHoverColor
           ? hasPreviewFill
             ? (previewValue as PaletteColor)
             : patternColor
@@ -272,24 +338,47 @@ export function PixelGrid({
             ? patternColor
             : (pixel as PaletteColor);
 
-        let opacity = 1;
-        if (tool === "bucket") {
-          opacity = bucketPreview?.has(index) ? 0.7 : 1;
-        } else if (showPathPreview) {
-          opacity = 0.7;
-        } else if (brushPreview?.has(index)) {
-          opacity = 0.7;
-        }
+        const opacity = dimStrokePreview &&
+          (showPathPreview || isBucketPreviewCell || isBrushPreviewCell) ? 0.7 : 1;
 
         context.globalAlpha = opacity;
         context.fillStyle = cellBackgroundColor;
-        context.fillRect(cellX, cellY, displayCellSize, displayCellSize);
+        context.fillRect(
+          cellLeft,
+          cellTop,
+          cellRight - cellLeft,
+          cellBottom - cellTop,
+        );
+        if (brushSizePreview?.has(index)) {
+          context.globalAlpha = 1;
+          context.fillStyle = "rgba(24, 24, 27, 0.55)";
+          context.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
+          context.fillStyle = "rgba(255, 255, 255, 0.8)";
+          const edge = Math.max(1, Math.round(Math.min(scaleX, scaleY)));
+          if (!brushSizePreview.has(index - gridWidth)) {
+            context.fillRect(cellLeft, cellTop, cellRight - cellLeft, edge);
+          }
+          if (!brushSizePreview.has(index + gridWidth)) {
+            context.fillRect(cellLeft, cellBottom - edge, cellRight - cellLeft, edge);
+          }
+          if (!brushSizePreview.has(index - 1) || x === 0) {
+            context.fillRect(cellLeft, cellTop, edge, cellBottom - cellTop);
+          }
+          if (!brushSizePreview.has(index + 1) || x === gridWidth - 1) {
+            context.fillRect(cellRight - edge, cellTop, edge, cellBottom - cellTop);
+          }
+        }
       }
     }
 
     context.globalAlpha = 1;
 
     if (showPixelGrid) {
+      context.setTransform(scaleX, 0, 0, scaleY, 0, 0);
+      context.save();
+      context.beginPath();
+      context.rect(renderOffsetX - scrollOriginX, renderOffsetY - scrollOriginY, contentWidth, contentHeight);
+      context.clip();
       context.strokeStyle = "rgba(228, 228, 231, 0.8)";
       context.lineWidth = 1;
       for (let column = startX; column <= endX; column += 1) {
@@ -308,12 +397,17 @@ export function PixelGrid({
         context.lineTo(viewportWidth, y);
         context.stroke();
       }
+      context.restore();
     }
   }, [
+    activeColor,
     brushPreview,
+    brushSizePreview,
     bucketPreview,
     canvasScroll.x,
     canvasScroll.y,
+    contentHeight,
+    contentWidth,
     displayCellSize,
     drawValueRef,
     gridHeight,
@@ -321,6 +415,7 @@ export function PixelGrid({
     pathPreview,
     pixels,
     previewToolEffects,
+    dimStrokePreview,
     showPixelGrid,
     tool,
     viewport.height,
@@ -340,10 +435,10 @@ export function PixelGrid({
       const rect = canvas.getBoundingClientRect();
       const relativeX = clientX - rect.left;
       const relativeY = clientY - rect.top;
-      const minX = renderOffsetX;
-      const minY = renderOffsetY;
-      const maxX = renderOffsetX + contentWidth;
-      const maxY = renderOffsetY + contentHeight;
+      const minX = renderOffsetX - scrollOriginX;
+      const minY = renderOffsetY - scrollOriginY;
+      const maxX = minX + contentWidth;
+      const maxY = minY + contentHeight;
       const isOutside =
         relativeX < minX ||
         relativeY < minY ||
@@ -418,6 +513,24 @@ export function PixelGrid({
 
   const handleCanvasPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>) => {
+      if (panGestureRef.current) return;
+      if (event.button === 1) {
+        event.preventDefault();
+        event.stopPropagation();
+        panGestureRef.current = {
+          pointerId: event.pointerId,
+          x: event.clientX,
+          y: event.clientY,
+        };
+        hoverIndexRef.current = null;
+        handlePointerLeave();
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+          // Pointer events on the canvas still work if capture is unavailable.
+        }
+        return;
+      }
       let index = resolveCellIndex(event);
       if (index === null) {
         onBackgroundPointerDown?.(event);
@@ -429,11 +542,27 @@ export function PixelGrid({
       hoverIndexRef.current = index;
       handlePointerDown(event, index);
     },
-    [handlePointerDown, onBackgroundPointerDown, resolveCellIndex, tool],
+    [handlePointerDown, handlePointerLeave, onBackgroundPointerDown, resolveCellIndex, tool],
   );
 
   const handleCanvasPointerMove = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>) => {
+      const gesture = panGestureRef.current;
+      if (gesture) {
+        if (gesture.pointerId === event.pointerId) {
+          const deltaX = event.clientX - gesture.x;
+          const deltaY = event.clientY - gesture.y;
+          gesture.x = event.clientX;
+          gesture.y = event.clientY;
+          if (deltaX || deltaY) {
+            onScrollChange((previous) => ({
+              x: previous.x - deltaX,
+              y: previous.y - deltaY,
+            }));
+          }
+        }
+        return;
+      }
       handlePointerMove(event);
       const index = resolveCellIndex(
         event,
@@ -441,12 +570,39 @@ export function PixelGrid({
       );
       emitPointerEnter(event, index);
     },
-    [emitPointerEnter, handlePointerMove, resolveCellIndex, tool],
+    [emitPointerEnter, handlePointerMove, onScrollChange, resolveCellIndex, tool],
   );
+
+  const finishPanGesture = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (panGestureRef.current?.pointerId !== event.pointerId) return false;
+    event.preventDefault();
+    panGestureRef.current = null;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    return true;
+  }, []);
+
+  const handleCanvasPointerUp = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (panGestureRef.current) {
+      finishPanGesture(event);
+      return;
+    }
+    handlePointerUp(event);
+  }, [finishPanGesture, handlePointerUp]);
+
+  const handleCanvasPointerCancel = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (panGestureRef.current) {
+      finishPanGesture(event);
+      return;
+    }
+    handlePointerCancel(event);
+  }, [finishPanGesture, handlePointerCancel]);
 
   const handleCanvasPointerEnter = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>) => {
       lockBodyScroll();
+      if (panGestureRef.current) return;
       const index = resolveCellIndex(event);
       emitPointerEnter(event, index);
     },
@@ -461,36 +617,109 @@ export function PixelGrid({
 
   useEffect(() => () => unlockBodyScroll(), [unlockBodyScroll]);
 
+  const accumulateZoom = useCallback(
+    (remainder: MutableRefObject<number>, delta: number, threshold: number, point: { x: number; y: number }) => {
+      if (!onWheelZoom || !Number.isFinite(delta) || delta === 0) return;
+      if (remainder.current !== 0 && Math.sign(remainder.current) !== Math.sign(delta)) {
+        remainder.current = 0;
+      }
+      remainder.current += delta;
+      const steps = Math.floor(Math.abs(remainder.current) / threshold);
+      if (steps === 0) return;
+      const direction = remainder.current < 0 ? "in" : "out";
+      remainder.current -= steps * threshold * Math.sign(remainder.current);
+      onWheelZoom(direction, steps, point);
+    },
+    [onWheelZoom],
+  );
+
   const handleCanvasWheel = useCallback(
-    (event: ReactWheelEvent<HTMLCanvasElement>) => {
-      const wantsZoom = onWheelZoom && event.metaKey;
+    (event: WheelEvent) => {
+      const discreteSteps = discreteWheelSteps(event);
+      const wantsZoom = onWheelZoom && (event.metaKey || event.ctrlKey || discreteSteps > 0);
       event.preventDefault();
       if (wantsZoom) {
-        wheelZoomDeltaRef.current += event.deltaY;
-        const focusIndex = resolveCellIndexFromPoint(event.clientX, event.clientY, {
-          clamp: true,
-        });
-        while (Math.abs(wheelZoomDeltaRef.current) >= ZOOM_WHEEL_THRESHOLD) {
-          const direction = wheelZoomDeltaRef.current < 0 ? "in" : "out";
-          wheelZoomDeltaRef.current -=
-            ZOOM_WHEEL_THRESHOLD * Math.sign(wheelZoomDeltaRef.current);
-          onWheelZoom?.(direction, focusIndex);
+        const point = { x: event.clientX, y: event.clientY };
+        if (discreteSteps > 0) {
+          wheelZoomDeltaRef.current = 0;
+          onWheelZoom(event.deltaY < 0 ? "in" : "out", discreteSteps, point);
+        } else {
+          const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.height : 1;
+          accumulateZoom(wheelZoomDeltaRef, event.deltaY * unit, ZOOM_WHEEL_THRESHOLD, point);
         }
         return;
       }
       wheelZoomDeltaRef.current = 0;
-      const proposedX = canvasScroll.x + event.deltaX;
-      const proposedY = canvasScroll.y + event.deltaY;
-      onScrollChange({ x: proposedX, y: proposedY });
+      if (hoverIndexRef.current !== null) {
+        hoverIndexRef.current = null;
+        handlePointerLeave();
+      }
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.height : 1;
+      const deltaX = event.deltaX * unit;
+      const deltaY = event.deltaY * unit;
+      onScrollChange((previous) => ({ x: previous.x + deltaX, y: previous.y + deltaY }));
     },
     [
-      canvasScroll.x,
-      canvasScroll.y,
+      handlePointerLeave,
+      accumulateZoom,
       onScrollChange,
       onWheelZoom,
-      resolveCellIndexFromPoint,
+      viewport.height,
     ],
   );
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    // React's wheel listener is passive, so a native listener is needed to
+    // keep browser page zoom from intercepting a canvas pinch gesture.
+    canvas.addEventListener("wheel", handleCanvasWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", handleCanvasWheel);
+  }, [handleCanvasWheel]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !onWheelZoom) return;
+    const gesturePoint = (event: SafariGestureEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: Number.isFinite(event.clientX) ? event.clientX! : rect.left + rect.width / 2,
+        y: Number.isFinite(event.clientY) ? event.clientY! : rect.top + rect.height / 2,
+      };
+    };
+    const startGesture = (rawEvent: Event) => {
+      const event = rawEvent as SafariGestureEvent;
+      event.preventDefault();
+      gestureScaleRef.current = event.scale > 0 ? event.scale : 1;
+      gestureZoomDeltaRef.current = 0;
+    };
+    const changeGesture = (rawEvent: Event) => {
+      const event = rawEvent as SafariGestureEvent;
+      event.preventDefault();
+      if (gestureScaleRef.current === null || !Number.isFinite(event.scale) || event.scale <= 0) return;
+      const previousScale = gestureScaleRef.current;
+      gestureScaleRef.current = event.scale;
+      accumulateZoom(
+        gestureZoomDeltaRef,
+        -Math.log(event.scale / previousScale),
+        ZOOM_GESTURE_THRESHOLD,
+        gesturePoint(event),
+      );
+    };
+    const endGesture = (event: Event) => {
+      event.preventDefault();
+      gestureScaleRef.current = null;
+      gestureZoomDeltaRef.current = 0;
+    };
+    canvas.addEventListener("gesturestart", startGesture, { passive: false });
+    canvas.addEventListener("gesturechange", changeGesture, { passive: false });
+    canvas.addEventListener("gestureend", endGesture, { passive: false });
+    return () => {
+      canvas.removeEventListener("gesturestart", startGesture);
+      canvas.removeEventListener("gesturechange", changeGesture);
+      canvas.removeEventListener("gestureend", endGesture);
+    };
+  }, [accumulateZoom, onWheelZoom]);
 
   const verticalTrackLength = Math.max(
     0,
@@ -502,32 +731,32 @@ export function PixelGrid({
   );
 
   const verticalHandleSize = useMemo(() => {
-    if (maxScrollY <= 0 || verticalTrackLength <= 0) return 0;
-    const ratio = viewport.height / contentHeight;
+    if (panRangeY <= 0 || verticalTrackLength <= 0) return 0;
+    const ratio = viewport.height / (viewport.height + panRangeY);
     const desired = ratio * verticalTrackLength;
     const maxSize = Math.max(0, verticalTrackLength - VERTICAL_HANDLE_PADDING * 2);
     return Math.min(maxSize, Math.max(MIN_SCROLLBAR_SIZE, desired));
-  }, [contentHeight, maxScrollY, verticalTrackLength, viewport.height]);
+  }, [panRangeY, verticalTrackLength, viewport.height]);
 
   const horizontalHandleSize = useMemo(() => {
-    if (maxScrollX <= 0 || horizontalTrackLength <= 0) return 0;
-    const ratio = viewport.width / contentWidth;
+    if (panRangeX <= 0 || horizontalTrackLength <= 0) return 0;
+    const ratio = viewport.width / (viewport.width + panRangeX);
     const desired = ratio * horizontalTrackLength;
     const maxSize = Math.max(0, horizontalTrackLength - HORIZONTAL_HANDLE_PADDING * 2);
     return Math.min(maxSize, Math.max(MIN_SCROLLBAR_SIZE, desired));
-  }, [contentWidth, horizontalTrackLength, maxScrollX, viewport.width]);
+  }, [horizontalTrackLength, panRangeX, viewport.width]);
 
   const verticalHandleOffset =
-    maxScrollY <= 0 || verticalTrackLength <= 0
+    panRangeY <= 0 || verticalTrackLength <= 0
       ? 0
       : VERTICAL_HANDLE_PADDING +
-        (canvasScroll.y / maxScrollY) *
+        ((clampPan(canvasScroll.y, panBoundsY) - panBoundsY.min) / panRangeY) *
           Math.max(1, verticalTrackLength - verticalHandleSize - VERTICAL_HANDLE_PADDING * 2);
   const horizontalHandleOffset =
-    maxScrollX <= 0 || horizontalTrackLength <= 0
+    panRangeX <= 0 || horizontalTrackLength <= 0
       ? 0
       : HORIZONTAL_HANDLE_PADDING +
-        (canvasScroll.x / maxScrollX) *
+        ((clampPan(canvasScroll.x, panBoundsX) - panBoundsX.min) / panRangeX) *
           Math.max(
             1,
             horizontalTrackLength - horizontalHandleSize - HORIZONTAL_HANDLE_PADDING * 2,
@@ -543,15 +772,18 @@ export function PixelGrid({
       const startPointer =
         orientation === "vertical" ? event.clientY : event.clientX;
       const startScroll =
-        orientation === "vertical" ? canvasScroll.y : canvasScroll.x;
+        orientation === "vertical"
+          ? clampPan(canvasScroll.y, panBoundsY)
+          : clampPan(canvasScroll.x, panBoundsX);
       const handleSize =
         orientation === "vertical" ? verticalHandleSize : horizontalHandleSize;
       const viewportLength =
         orientation === "vertical"
           ? verticalTrackLength
           : horizontalTrackLength;
-      const maxScroll = orientation === "vertical" ? maxScrollY : maxScrollX;
-      if (maxScroll <= 0 || viewportLength <= 0) {
+      const bounds = orientation === "vertical" ? panBoundsY : panBoundsX;
+      const panRange = bounds.max - bounds.min;
+      if (panRange <= 0 || viewportLength <= 0) {
         return;
       }
       const trackLength = Math.max(1, viewportLength - handleSize);
@@ -560,11 +792,11 @@ export function PixelGrid({
         const pointer =
           orientation === "vertical" ? moveEvent.clientY : moveEvent.clientX;
         const delta = pointer - startPointer;
-        const proposed = startScroll + (delta / trackLength) * maxScroll;
+        const proposed = clampPan(startScroll + (delta / trackLength) * panRange, bounds);
         if (orientation === "vertical") {
-          onScrollChange({ x: canvasScroll.x, y: proposed });
+          onScrollChange((previous) => ({ x: previous.x, y: proposed }));
         } else {
-          onScrollChange({ x: proposed, y: canvasScroll.y });
+          onScrollChange((previous) => ({ x: proposed, y: previous.y }));
         }
       };
 
@@ -581,8 +813,8 @@ export function PixelGrid({
       canvasScroll.y,
       horizontalHandleSize,
       horizontalTrackLength,
-      maxScrollX,
-      maxScrollY,
+      panBoundsX,
+      panBoundsY,
       onScrollChange,
       verticalHandleSize,
       verticalTrackLength,
@@ -614,10 +846,16 @@ export function PixelGrid({
         onContextMenu={(event) => event.preventDefault()}
         onPointerDown={handleCanvasPointerDown}
         onPointerMove={handleCanvasPointerMove}
-        onPointerUp={handlePointerUp}
+        onPointerUp={handleCanvasPointerUp}
+        onPointerCancel={handleCanvasPointerCancel}
+        onLostPointerCapture={(event) => {
+          if (panGestureRef.current?.pointerId === event.pointerId) panGestureRef.current = null;
+        }}
+        onAuxClick={(event) => {
+          if (event.button === 1) event.preventDefault();
+        }}
         onPointerEnter={handleCanvasPointerEnter}
         onPointerLeave={handleCanvasPointerLeave}
-        onWheel={handleCanvasWheel}
       />
 
       {(selectionPreviewRect || selectionOverlay) && (
@@ -670,7 +908,7 @@ export function PixelGrid({
         </div>
       )}
 
-      {maxScrollY > 0 && verticalHandleSize > 0 && (
+      {panRangeY > 0 && verticalHandleSize > 0 && (
         <div className="absolute border-2 border-stone-950 right-2 top-2 bottom-6 w-3 rounded-full bg-zinc-200/60 dark:bg-stone-950">
           <div
             className="absolute left-0 right-0 cursor-pointer rounded-full bg-zinc-500 dark:bg-slate-300"
@@ -684,7 +922,7 @@ export function PixelGrid({
           />
         </div>
       )}
-      {maxScrollX > 0 && horizontalHandleSize > 0 && (
+      {panRangeX > 0 && horizontalHandleSize > 0 && (
         <div className="absolute border-2 border-stone-950 left-2 right-6 bottom-2 h-3 rounded-full bg-zinc-200/60 dark:bg-stone-950">
           <div
             className="absolute top-0 bottom-0 cursor-pointer rounded-full bg-black-500 dark:bg-slate-300"

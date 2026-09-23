@@ -8,6 +8,14 @@ export const RectSelectionTool: PaintTool = {
   hotkey: "r",
 };
 
+export const MoveTool: PaintTool = {
+  id: "move",
+  label: "Move",
+  icon: "/icons/tools/move.png",
+  settings: { autoPickLayer: true },
+  hotkey: "m",
+};
+
 export const PencilTool: PaintTool = {
   id: "pencil",
   label: "Pencil",
@@ -15,9 +23,6 @@ export const PencilTool: PaintTool = {
   settings: {
     brushSize: true,
     brushShape: true,
-    paletteTheme: true,
-    palette: true,
-    selectedColor: true,
   },
   hotkey: "q",
 };
@@ -29,9 +34,6 @@ export const LineTool: PaintTool = {
   settings: {
     brushSize: true,
     brushShape: true,
-    paletteTheme: true,
-    palette: true,
-    selectedColor: true,
   },
   hotkey: "d",
 };
@@ -44,9 +46,6 @@ export const ShapeTool: PaintTool = {
     brushSize: true,
     shapeType: true,
     shapeFilled: true,
-    paletteTheme: true,
-    palette: true,
-    selectedColor: true,
   },
   hotkey: "s",
 };
@@ -55,9 +54,7 @@ export const ColorPickerTool: PaintTool = {
   id: "picker",
   label: "Picker",
   icon: "/icons/tools/ColorPicker.png",
-  settings: {
-    selectedColor: true,
-  },
+  settings: {},
   hotkey: "e",
 };
 
@@ -65,11 +62,7 @@ export const BucketTool: PaintTool = {
   id: "bucket",
   label: "Bucket",
   icon: "/icons/tools/Bucket.png",
-  settings: {
-    paletteTheme: true,
-    palette: true,
-    selectedColor: true,
-  },
+  settings: {},
   hotkey: "g",
 };
 
@@ -80,7 +73,6 @@ export const EraserTool: PaintTool = {
   settings: {
     brushSize: true,
     brushShape: true,
-    selectedColor: true,
   },
   hotkey: "w",
 };

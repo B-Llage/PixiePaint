@@ -1,20 +1,16 @@
-import { Dispatch, MutableRefObject, SetStateAction } from "react";
-
 import { BrushShapeSelector } from "./Settings/Tool/BrushShapeSelector";
 import { BrushSizeSelector } from "./Settings/Tool/BrushSizeSelector";
-import { ColorPalette } from "./Settings/Tool/ColorPalette";
-import { PaletteThemeSelector } from "./Settings/Tool/PaletteThemeSelector";
-import { SelectedColor, SelectedColorStyles } from "./Settings/Tool/SelectedColor";
 import { ShapeSelector } from "./Settings/Tool/ShapeSelector";
 import { ZoomModeSelector } from "./Settings/Tool/ZoomModeSelector";
-import { BRUSH_SHAPES, BRUSH_SIZES, SHAPE_TYPES } from "./PixelPencil.constants";
-import { PaintTool, PaletteColor, PaletteTheme, PixelValue, ShapeKind, BrushShape } from "./PixelPencilTypes";
+import { BRUSH_SHAPES, SHAPE_TYPES } from "./PixelPencil.constants";
+import { PaintTool, ShapeKind, BrushShape } from "./PixelPencilTypes";
 import { ZoomMode } from "./hooks/useZoomControls";
 
 interface ToolSettingsPanelProps {
   currentTool: PaintTool;
   brushSize: number;
   onBrushSizeChange: (size: number) => void;
+  onBrushSizeDragChange: (dragging: boolean) => void;
   brushShape: BrushShape;
   onBrushShapeChange: (shape: BrushShape) => void;
   shapeType: ShapeKind;
@@ -23,19 +19,15 @@ interface ToolSettingsPanelProps {
   onShapeFilledChange: (filled: boolean) => void;
   zoomMode: ZoomMode;
   onZoomModeChange: (mode: ZoomMode) => void;
-  paletteThemeId: string;
-  setPaletteThemeId: Dispatch<SetStateAction<string>>;
-  currentPalette: PaletteTheme;
-  drawValueRef: MutableRefObject<PixelValue>;
-  setActiveColor: Dispatch<SetStateAction<PaletteColor>>;
-  paletteColors: PaletteColor[];
-  selectedColorStyles: SelectedColorStyles;
+  autoPickLayer: boolean;
+  onAutoPickLayerChange: (enabled: boolean) => void;
 }
 
 export function ToolSettingsPanel({
   currentTool,
   brushSize,
   onBrushSizeChange,
+  onBrushSizeDragChange,
   brushShape,
   onBrushShapeChange,
   shapeType,
@@ -44,28 +36,20 @@ export function ToolSettingsPanel({
   onShapeFilledChange,
   zoomMode,
   onZoomModeChange,
-  paletteThemeId,
-  setPaletteThemeId,
-  currentPalette,
-  drawValueRef,
-  setActiveColor,
-  paletteColors,
-  selectedColorStyles,
+  autoPickLayer,
+  onAutoPickLayerChange,
 }: ToolSettingsPanelProps) {
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
-      <span className="text-xs font-semibold uppercase tracking-wide text-zinc-900 dark:text-zinc-50">
+    <div data-tool-settings className="flex h-12 min-w-0 items-center gap-4">
+      <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-zinc-300">
         Tool Settings
       </span>
-      <div className="flex-1 min-h-0 space-y-4 overflow-auto pr-1">
+      <div className="flex h-full min-w-0 flex-1 items-center gap-5 overflow-x-auto overflow-y-hidden [&>div]:shrink-0" style={{ scrollbarWidth: "none" }}>
         {currentTool.settings.brushSize && (
           <BrushSizeSelector
-            options={BRUSH_SIZES}
             value={brushSize}
-            onChange={(value) => {
-              const newSize = typeof value === "function" ? value(brushSize) : value;
-              onBrushSizeChange(newSize);
-            }}
+            onChange={onBrushSizeChange}
+            onDragChange={onBrushSizeDragChange}
           />
         )}
 
@@ -92,7 +76,7 @@ export function ToolSettingsPanel({
         )}
 
         {currentTool.settings.shapeFilled && (
-          <label className="flex items-center justify-between gap-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
+          <label className="flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-full border border-zinc-700 bg-zinc-800 px-3 text-xs text-zinc-200">
             <span className="font-medium uppercase">Filled Shape</span>
             <input
               type="checkbox"
@@ -107,26 +91,16 @@ export function ToolSettingsPanel({
           <ZoomModeSelector value={zoomMode} onChange={onZoomModeChange} />
         )}
 
-        {currentTool.settings.paletteTheme && (
-          <PaletteThemeSelector
-            paletteThemeId={paletteThemeId}
-            currentPalette={currentPalette}
-            drawValueRef={drawValueRef}
-            setPaletteThemeId={setPaletteThemeId}
-            setActiveColor={setActiveColor}
-          />
-        )}
-
-        {currentTool.settings.palette && (
-          <ColorPalette
-            paletteColors={paletteColors}
-            setActiveColor={setActiveColor}
-            drawValueRef={drawValueRef}
-          />
-        )}
-
-        {currentTool.settings.selectedColor && (
-          <SelectedColor selectedColorStyles={selectedColorStyles} />
+        {currentTool.settings.autoPickLayer && (
+          <label className="flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-full border border-zinc-700 bg-zinc-800 px-3 text-xs text-zinc-200">
+            <span className="font-medium uppercase">Auto Pick Layer</span>
+            <input
+              type="checkbox"
+              checked={autoPickLayer}
+              onChange={(event) => onAutoPickLayerChange(event.target.checked)}
+              className="h-3.5 w-3.5 rounded border-zinc-300 text-black focus:ring-black dark:border-zinc-600 dark:text-white dark:focus:ring-white"
+            />
+          </label>
         )}
       </div>
     </div>

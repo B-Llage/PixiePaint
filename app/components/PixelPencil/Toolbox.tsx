@@ -17,6 +17,7 @@ export function Toolbox({ tools, selectedToolId, onSelect }: ToolboxProps) {
           <div key={option.id} className="group relative flex">
             <button
               type="button"
+              data-pixel-tool={option.id}
               className={`flex items-center justify-center rounded-full border border-zinc-300 p-3 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:border-zinc-700 dark:focus-visible:ring-white dark:focus-visible:ring-offset-black ${
                 isSelected
                   ? "bg-black text-white dark:bg-white dark:text-black"

@@ -3,7 +3,7 @@ export const TRANSPARENT_DARK = "#9ca3af";
 
 export const MAX_HISTORY = 15;
 
-export const BRUSH_SIZES = [1, 2, 3] as const;
+export const MAX_BRUSH_SIZE = 256;
 export const EXPORT_SCALES = [1, 3, 5, 10] as const;
 export const MAX_ZOOM_SCALE = 5;
 

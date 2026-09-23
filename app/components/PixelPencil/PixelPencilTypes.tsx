@@ -8,12 +8,10 @@ export interface PaintTool {
   settings: {
     brushSize?: boolean;
     brushShape?: boolean;
-    paletteTheme?: boolean;
-    palette?: boolean;
-    selectedColor?: boolean;
     shapeType?: boolean;
     shapeFilled?: boolean;
     zoomMode?: boolean;
+    autoPickLayer?: boolean;
   };
 }
 
