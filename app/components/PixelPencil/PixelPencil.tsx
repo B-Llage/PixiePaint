@@ -1,24 +1,28 @@
 "use client";
 
 import Image from "next/image";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent, SetStateAction } from "react";
 import { PaintTool, PaletteTheme, BrushShape, PaletteColor, PixelValue, ShapeKind } from "./PixelPencilTypes";
-import { BucketTool, ColorPickerTool, EraserTool, LineTool, MagnifierTool, PencilTool, RectSelectionTool, ShapeTool } from "./PixelPencilTools";
+import { BucketTool, ColorPickerTool, EraserTool, LineTool, MagnifierTool, MoveTool, PencilTool, RectSelectionTool, ShapeTool } from "./PixelPencilTools";
 import { PixelPencilPalettes } from "./PixelPencilPalettes";
 import { CANVAS_PIXEL_SIZE_OPTIONS, usePixelPencilSettings } from "./context/PixelPencilSettingsContext";
-import { MAX_HISTORY } from "./PixelPencil.constants";
+import { MAX_HISTORY, MAX_ZOOM_SCALE } from "./PixelPencil.constants";
 import { usePixelExport } from "./hooks/usePixelExport";
 import { useZoomControls } from "./hooks/useZoomControls";
 import { Toolbox } from "./Toolbox";
 import { ToolSettingsPanel } from "./ToolSettingsPanel";
+import { PalettePanel } from "./PalettePanel";
 import { PixelGrid } from "./PixelGrid";
 import { PixelPencilModals } from "./PixelPencilModals";
 import { LayersPanel } from "./LayersPanel";
+import { composeLayers, translatePixels } from "./pixel-operations";
+import { getPanBounds, includePanOffset } from "./canvas-pan";
 import packageJson from "../../../package.json";
 
 const TOOLS: readonly PaintTool[] = [
   RectSelectionTool,
+  MoveTool,
   PencilTool,
   EraserTool,
   ColorPickerTool,
@@ -69,6 +73,20 @@ type SelectionState = {
   offset: { dx: number; dy: number };
   pixels: SelectionPixel[];
   isFloating: boolean;
+};
+
+type MoveDrag = {
+  pointerId: number;
+  layerId: string;
+  originalActiveLayerId: string;
+  origin: { x: number; y: number };
+  delta: { dx: number; dy: number };
+  sourcePixels: PixelValue[];
+  movePixels: PixelValue[];
+  sourceSelection: SelectionState | null;
+  previousUndo: LayerSnapshot[];
+  previousRedo: LayerSnapshot[];
+  actionStarted: boolean;
 };
 
 const cloneLayer = (layer: Layer, totalCells: number): Layer => {
@@ -144,21 +162,6 @@ const areLayersEqual = (a: Layer[], b: Layer[]) => {
   return true;
 };
 
-const composeLayers = (layers: Layer[], totalCells: number): PixelValue[] => {
-  const composed = new Array(totalCells).fill(null) as PixelValue[];
-  for (let index = 0; index < totalCells; index += 1) {
-    for (let layerIndex = layers.length - 1; layerIndex >= 0; layerIndex -= 1) {
-      const layer = layers[layerIndex];
-      if (!layer.visible) continue;
-      const value = layer.pixels[index];
-      if (value === null || value === "transparent") continue;
-      composed[index] = value;
-      break;
-    }
-  }
-  return composed;
-};
-
 const generateLayerName = (existingLayers: Layer[]) => {
   let suffix = existingLayers.length + 1;
   while (existingLayers.some((layer) => layer.name === `Layer ${suffix}`)) {
@@ -170,6 +173,7 @@ const generateLayerName = (existingLayers: Layer[]) => {
 export function PixelPencil() {
   const {
     previewToolEffects,
+    dimStrokePreview,
     canvasPixelSize,
     setCanvasPixelSize,
     gridWidth,
@@ -217,7 +221,9 @@ export function PixelPencil() {
     PALETTE_THEMES[0].colors[0],
   );
   const [tool, setTool] = useState<Tool>("pencil");
+  const [autoPickLayer, setAutoPickLayer] = useState(false);
   const [brushSize, setBrushSize] = useState<number>(1);
+  const [brushSizeDragging, setBrushSizeDragging] = useState(false);
   const [brushShape, setBrushShape] = useState<BrushShape>("square");
   const [shapeType, setShapeType] = useState<ShapeKind>("square");
   const [shapeFilled, setShapeFilled] = useState(false);
@@ -232,7 +238,7 @@ export function PixelPencil() {
   const [isSettingsDialogOpen, setIsSettingsDialogOpen] = useState(false);
   const [isChangelogDialogOpen, setIsChangelogDialogOpen] = useState(false);
   const [isHotkeysDialogOpen, setIsHotkeysDialogOpen] = useState(false);
-  const { zoomScale, zoomMode, setZoomMode, applyZoom } = useZoomControls();
+  const { zoomScale, setZoomScale, zoomMode, setZoomMode } = useZoomControls();
   const isDrawingRef = useRef(false);
   const drawValueRef = useRef<PixelValue>(PALETTE_THEMES[0].colors[0]);
   const [drawValueVersion, setDrawValueVersion] = useState(0);
@@ -258,9 +264,9 @@ export function PixelPencil() {
   const wrapperParentHeightRef = useRef<number | null>(null);
   const gridRef = useRef<HTMLCanvasElement | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
+  const ignoredCanvasPointerIdRef = useRef<number | null>(null);
   const pointerQueueRef = useRef<{ x: number; y: number }[]>([]);
   const pointerRAFRef = useRef<number | null>(null);
-  const zoomFocusIndexRef = useRef<number | null>(null);
   const selectionDraftOriginRef = useRef<{ x: number; y: number } | null>(null);
   const selectionMoveRef = useRef<
     | {
@@ -272,11 +278,13 @@ export function PixelPencil() {
   const selectionLastPointerCellRef = useRef<{ x: number; y: number } | null>(null);
   const selectionActionActiveRef = useRef(false);
   const selectionPointerIdRef = useRef<number | null>(null);
+  const moveDragRef = useRef<MoveDrag | null>(null);
   const [dragStartIndex, setDragStartIndex] = useState<number | null>(null);
   const [pathPreview, setPathPreview] = useState<Set<number> | null>(null);
   const [availableWidth, setAvailableWidth] = useState<number>(0);
   const [availableHeight, setAvailableHeight] = useState<number>(0);
   const [canvasScroll, setCanvasScroll] = useState({ x: 0, y: 0 });
+  const [zoomPanException, setZoomPanException] = useState(false);
   const [canvasViewport, setCanvasViewport] = useState({ width: 0, height: 0 });
   const selectionRef = useRef<SelectionState | null>(null);
   const [selection, setSelectionState] = useState<SelectionState | null>(null);
@@ -303,7 +311,9 @@ export function PixelPencil() {
   const [selectionPreviewRect, setSelectionPreviewRect] = useState<SelectionRect | null>(null);
   const prevDimensionsRef = useRef({ width: gridWidth, height: gridHeight });
   const [isMobile, setIsMobile] = useState(false);
-  const [viewportWidth, setViewportWidth] = useState<number | null>(null);
+  const [mobilePanel, setMobilePanel] = useState<"layers" | "palette" | null>(null);
+  const mobileLayersButtonRef = useRef<HTMLButtonElement | null>(null);
+  const mobilePaletteButtonRef = useRef<HTMLButtonElement | null>(null);
   const setActiveLayerPixels = useCallback(
     (
       next:
@@ -429,9 +439,8 @@ export function PixelPencil() {
   );
 
   const captureSelectionPixels = useCallback(
-    (rect: SelectionRect): SelectionPixel[] => {
+    (rect: SelectionRect, source = activeLayerPixelsRef.current): SelectionPixel[] => {
       const result: SelectionPixel[] = [];
-      const source = activeLayerPixelsRef.current;
       for (let relY = 0; relY < rect.height; relY += 1) {
         for (let relX = 0; relX < rect.width; relX += 1) {
           const absX = rect.x + relX;
@@ -628,6 +637,60 @@ export function PixelPencil() {
     actionModifiedRef.current = false;
   }, [recordSnapshot, updateHistoryState]);
 
+  const setMoveLayerPixels = useCallback((layerId: string, pixels: PixelValue[]) => {
+    const index = layersRef.current.findIndex((layer) => layer.id === layerId);
+    if (index < 0) return;
+    const nextLayers = [...layersRef.current];
+    nextLayers[index] = { ...nextLayers[index], pixels };
+    layersRef.current = nextLayers;
+    setLayers(nextLayers);
+    activeLayerPixelsRef.current = pixels;
+    setActiveLayerPixelsState(pixels);
+  }, []);
+
+  const finishMoveDrag = useCallback((pointerId: number, cancelled: boolean) => {
+    const drag = moveDragRef.current;
+    if (!drag || drag.pointerId !== pointerId) return false;
+    moveDragRef.current = null;
+    const canvas = gridRef.current;
+    if (canvas?.hasPointerCapture?.(pointerId)) {
+      try {
+        canvas.releasePointerCapture(pointerId);
+      } catch {
+        // The browser may have already released capture.
+      }
+    }
+    const currentLayer = layersRef.current.find((layer) => layer.id === drag.layerId);
+    const changed = drag.actionStarted && !!currentLayer && (
+      !arePixelsEqual(currentLayer.pixels, drag.sourcePixels) ||
+      !areSelectionsEqual(selectionRef.current, drag.sourceSelection)
+    );
+    if (cancelled || !changed) {
+      if (drag.actionStarted) {
+        setMoveLayerPixels(drag.layerId, drag.sourcePixels.slice());
+        const restoredSelection = cloneSelection(drag.sourceSelection);
+        selectionRef.current = restoredSelection;
+        setSelection(restoredSelection);
+        undoStackRef.current = drag.previousUndo;
+        redoStackRef.current = drag.previousRedo;
+        actionInProgressRef.current = false;
+        actionModifiedRef.current = false;
+        updateHistoryState();
+      }
+      if (cancelled && drag.originalActiveLayerId !== drag.layerId) {
+        const originalLayer = layersRef.current.find((layer) => layer.id === drag.originalActiveLayerId);
+        if (originalLayer) {
+          setActiveLayerId(originalLayer.id);
+          activeLayerPixelsRef.current = originalLayer.pixels;
+          setActiveLayerPixelsState(originalLayer.pixels);
+        }
+      }
+    } else {
+      finalizeAction();
+    }
+    return true;
+  }, [finalizeAction, setMoveLayerPixels, setSelection, updateHistoryState]);
+
   const deleteSelection = useCallback(() => {
     const current = selectionRef.current;
     if (!current) return;
@@ -716,8 +779,11 @@ export function PixelPencil() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const query = window.matchMedia("(max-width: 640px)");
-    const update = () => setIsMobile(query.matches);
+    const query = window.matchMedia("(max-width: 767px)");
+    const update = () => {
+      setIsMobile(query.matches);
+      if (!query.matches) setMobilePanel(null);
+    };
     update();
     if (typeof query.addEventListener === "function") {
       query.addEventListener("change", update);
@@ -725,14 +791,6 @@ export function PixelPencil() {
     }
     query.addListener(update);
     return () => query.removeListener(update);
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const handleResize = () => setViewportWidth(window.innerWidth);
-    handleResize();
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
   }, []);
 
   useEffect(() => {
@@ -766,16 +824,7 @@ export function PixelPencil() {
     if (!availableWidth) {
       return canvasPixelSize;
     }
-    const paddingOffset = 8; // account for grid padding (p-2)
-    let effectiveWidth = Math.max(0, availableWidth - paddingOffset);
-    if (isMobile && viewportWidth) {
-      const viewportAvailable = Math.max(
-        0,
-        viewportWidth - paddingOffset - 24,
-      );
-      effectiveWidth = Math.min(effectiveWidth, viewportAvailable);
-    }
-    const maxCellSizeWidth = Math.floor(effectiveWidth / gridWidth);
+    const maxCellSizeWidth = Math.floor(availableWidth / gridWidth);
 
     const dimensionCandidates: number[] = [];
     if (Number.isFinite(maxCellSizeWidth) && maxCellSizeWidth > 0) {
@@ -783,8 +832,7 @@ export function PixelPencil() {
     }
 
     if (availableHeight) {
-      const effectiveHeight = Math.max(0, availableHeight - paddingOffset);
-      const maxCellSizeHeight = Math.floor(effectiveHeight / gridHeight);
+      const maxCellSizeHeight = Math.floor(availableHeight / gridHeight);
       if (Number.isFinite(maxCellSizeHeight) && maxCellSizeHeight > 0) {
         dimensionCandidates.push(maxCellSizeHeight);
       }
@@ -805,7 +853,6 @@ export function PixelPencil() {
     gridHeight,
     gridWidth,
     isMobile,
-    viewportWidth,
   ]);
   const displayCellSize = useMemo(
     () => baseCellSize * zoomScale,
@@ -821,99 +868,43 @@ export function PixelPencil() {
     canvasViewport.height > 0 && contentHeight > 0 && contentHeight <= canvasViewport.height
       ? (canvasViewport.height - contentHeight) / 2
       : 0;
-  const scrollOriginX = contentWidth <= canvasViewport.width ? 0 : canvasScroll.x;
-  const scrollOriginY = contentHeight <= canvasViewport.height ? 0 : canvasScroll.y;
+  const scrollOriginX = canvasScroll.x;
+  const scrollOriginY = canvasScroll.y;
+  const basePanBoundsX = getPanBounds(contentWidth, canvasViewport.width, renderOffsetX);
+  const basePanBoundsY = getPanBounds(contentHeight, canvasViewport.height, renderOffsetY);
+  const { min: minPanX, max: maxPanX } = zoomPanException
+    ? includePanOffset(basePanBoundsX, canvasScroll.x)
+    : basePanBoundsX;
+  const { min: minPanY, max: maxPanY } = zoomPanException
+    ? includePanOffset(basePanBoundsY, canvasScroll.y)
+    : basePanBoundsY;
 
-  const setCanvasScrollClamped = useCallback(
-    (
-      next:
-        | { x: number; y: number }
-        | ((previous: { x: number; y: number }) => { x: number; y: number }),
-    ) => {
-      setCanvasScroll((prev) => {
-        const resolved =
-          typeof next === "function" ? next(prev) : (next as { x: number; y: number });
-        const maxX = Math.max(
-          0,
-          gridWidth * displayCellSize - canvasViewport.width,
-        );
-        const maxY = Math.max(
-          0,
-          gridHeight * displayCellSize - canvasViewport.height,
-        );
-        const nextX =
-          maxX === 0 ? 0 : Math.min(Math.max(0, resolved.x ?? 0), maxX);
-        const nextY =
-          maxY === 0 ? 0 : Math.min(Math.max(0, resolved.y ?? 0), maxY);
-        if (prev.x === nextX && prev.y === nextY) {
-          return prev;
-        }
-        return { x: nextX, y: nextY };
+  const setCanvasScrollLimited = useCallback(
+    (next: SetStateAction<{ x: number; y: number }>) => {
+      setCanvasScroll((previous) => {
+        const resolved = typeof next === "function" ? next(previous) : next;
+        const x = Math.min(maxPanX, Math.max(minPanX, resolved.x));
+        const y = Math.min(maxPanY, Math.max(minPanY, resolved.y));
+        return previous.x === x && previous.y === y ? previous : { x, y };
       });
     },
-    [canvasViewport.height, canvasViewport.width, displayCellSize, gridHeight, gridWidth],
+    [maxPanX, maxPanY, minPanX, minPanY],
   );
 
   const handleViewportResize = useCallback((size: { width: number; height: number }) => {
+    setZoomPanException(false);
     setCanvasViewport((prev) =>
       prev.width === size.width && prev.height === size.height ? prev : size,
     );
   }, []);
 
-  const centerPixelInView = useCallback(
-    (index: number) => {
-      if (displayCellSize <= 0 || gridWidth <= 0 || gridHeight <= 0) return;
-      if (canvasViewport.width <= 0 || canvasViewport.height <= 0) return;
-      if (index < 0 || index >= gridWidth * gridHeight) return;
-      setCanvasScrollClamped(() => {
-        const x = index % gridWidth;
-        const y = Math.floor(index / gridWidth);
-        const targetX =
-          x * displayCellSize + displayCellSize / 2 - canvasViewport.width / 2;
-        const targetY =
-          y * displayCellSize + displayCellSize / 2 - canvasViewport.height / 2;
-        return { x: targetX, y: targetY };
-      });
-    },
-    [
-      canvasViewport.height,
-      canvasViewport.width,
-      displayCellSize,
-      gridHeight,
-      gridWidth,
-      setCanvasScrollClamped,
-    ],
-  );
-
-  useLayoutEffect(() => {
-    if (zoomFocusIndexRef.current === null) {
-      return;
-    }
-    const targetIndex = zoomFocusIndexRef.current;
-    zoomFocusIndexRef.current = null;
-    centerPixelInView(targetIndex);
-  }, [centerPixelInView, displayCellSize]);
+  useEffect(() => {
+    setZoomPanException(false);
+  }, [baseCellSize, gridHeight, gridWidth]);
 
   useEffect(() => {
-    setCanvasScrollClamped((previous) => previous);
-  }, [
-    canvasViewport.height,
-    canvasViewport.width,
-    displayCellSize,
-    gridHeight,
-    gridWidth,
-    setCanvasScrollClamped,
-  ]);
-
-  const handleWheelZoom = useCallback(
-    (direction: "in" | "out", focusIndex: number | null) => {
-      if (focusIndex !== null) {
-        zoomFocusIndexRef.current = focusIndex;
-      }
-      applyZoom(direction);
-    },
-    [applyZoom],
-  );
+    setCanvasScrollLimited((previous) => previous);
+  }, [setCanvasScrollLimited]);
 
   useEffect(() => {
     activeLayerPixelsRef.current = activeLayerPixels;
@@ -1295,29 +1286,29 @@ export function PixelPencil() {
       const endOffset = Math.ceil((brushSize - 1) / 2);
       const indices: number[] = [];
 
-      for (let dy = startOffset; dy <= endOffset; dy += 1) {
-        for (let dx = startOffset; dx <= endOffset; dx += 1) {
+      const circleCenter = (startOffset + endOffset) / 2;
+      const radiusSquared = (brushSize / 2) ** 2;
+
+      const minY = Math.max(startOffset, -centerY);
+      const maxY = Math.min(endOffset, gridHeight - 1 - centerY);
+      const minX = Math.max(startOffset, -centerX);
+      const maxX = Math.min(endOffset, gridWidth - 1 - centerX);
+
+      for (let dy = minY; dy <= maxY; dy += 1) {
+        for (let dx = minX; dx <= maxX; dx += 1) {
           if (
             brushShape === "circle" &&
-            Math.abs(dx) + Math.abs(dy) > 1
+            (dx - circleCenter) ** 2 + (dy - circleCenter) ** 2 > radiusSquared
           ) {
             continue;
           }
-
-          const x = centerX + dx;
-          const y = centerY + dy;
-
-          if (!isInBounds(x, y)) {
-            continue;
-          }
-
-          indices.push(coordsToIndex(x, y));
+          indices.push(coordsToIndex(centerX + dx, centerY + dy));
         }
       }
 
       return indices;
     },
-    [brushShape, brushSize, coordsToIndex, gridWidth, isInBounds],
+    [brushShape, brushSize, coordsToIndex, gridHeight, gridWidth],
   );
 
   const applyBrush = useCallback(
@@ -1655,6 +1646,25 @@ export function PixelPencil() {
     [activeLayerId, recordSnapshot, setHoverIndexIfChanged, setPathPreview, updateHistoryState],
   );
 
+  const handleRenameLayer = useCallback(
+    (layerId: string, name: string) => {
+      const trimmedName = name.trim();
+      const currentLayers = layersRef.current;
+      const layer = currentLayers.find((item) => item.id === layerId);
+      if (!layer || !trimmedName || layer.name === trimmedName) return;
+
+      recordSnapshot();
+      redoStackRef.current = [];
+      const nextLayers = currentLayers.map((item) =>
+        item.id === layerId ? { ...item, name: trimmedName } : item,
+      );
+      layersRef.current = nextLayers;
+      setLayers(nextLayers);
+      updateHistoryState();
+    },
+    [recordSnapshot, updateHistoryState],
+  );
+
   const handleToggleLayerVisibility = useCallback(
     (layerId: string) => {
       if (!layersRef.current.some((layer) => layer.id === layerId)) {
@@ -1917,10 +1927,10 @@ export function PixelPencil() {
       if (!Number.isFinite(relativeX) || !Number.isFinite(relativeY)) {
         return null;
       }
-      const contentMinX = renderOffsetX;
-      const contentMinY = renderOffsetY;
-      const contentMaxX = renderOffsetX + contentWidth;
-      const contentMaxY = renderOffsetY + contentHeight;
+      const contentMinX = renderOffsetX - scrollOriginX;
+      const contentMinY = renderOffsetY - scrollOriginY;
+      const contentMaxX = contentMinX + contentWidth;
+      const contentMaxY = contentMinY + contentHeight;
       let adjustedX = relativeX;
       let adjustedY = relativeY;
       const isOutside =
@@ -1990,6 +2000,57 @@ export function PixelPencil() {
     (event: ReactPointerEvent<Element>, options?: { clamp?: boolean }) =>
       resolvePointerFromClientPoint(event.clientX, event.clientY, options),
     [resolvePointerFromClientPoint],
+  );
+
+  const zoomAtClientPoint = useCallback(
+    (direction: "in" | "out", steps: number, clientX: number, clientY: number) => {
+      const nextScale = Math.min(
+        MAX_ZOOM_SCALE,
+        Math.max(1, zoomScale + (direction === "in" ? steps : -steps)),
+      );
+      if (nextScale === zoomScale || !gridRef.current || displayCellSize <= 0) return;
+      const position = resolvePositionFromClientPoint(clientX, clientY, { clamp: true });
+      if (!position) return;
+      const rect = gridRef.current.getBoundingClientRect();
+      const pointerX = clientX - rect.left;
+      const pointerY = clientY - rect.top;
+      const nextCellSize = baseCellSize * nextScale;
+      const nextWidth = gridWidth * nextCellSize;
+      const nextHeight = gridHeight * nextCellSize;
+      const nextOffsetX =
+        nextWidth > 0 && nextWidth <= canvasViewport.width
+          ? (canvasViewport.width - nextWidth) / 2
+          : 0;
+      const nextOffsetY =
+        nextHeight > 0 && nextHeight <= canvasViewport.height
+          ? (canvasViewport.height - nextHeight) / 2
+          : 0;
+
+      setZoomScale(nextScale);
+      setZoomPanException(true);
+      setCanvasScroll({
+        x: position.x * nextCellSize + nextOffsetX - pointerX,
+        y: position.y * nextCellSize + nextOffsetY - pointerY,
+      });
+    },
+    [
+      baseCellSize,
+      canvasViewport.height,
+      canvasViewport.width,
+      displayCellSize,
+      gridHeight,
+      gridWidth,
+      resolvePositionFromClientPoint,
+      setZoomScale,
+      zoomScale,
+    ],
+  );
+
+  const handleWheelZoom = useCallback(
+    (direction: "in" | "out", steps: number, point: { x: number; y: number }) => {
+      zoomAtClientPoint(direction, steps, point.x, point.y);
+    },
+    [zoomAtClientPoint],
   );
 
   const resolveIndexFromPointerEvent = useCallback(
@@ -2075,9 +2136,121 @@ export function PixelPencil() {
     };
   }, [processDrawingSamples, tool]);
 
+  const updateMoveDrag = useCallback((clientX: number, clientY: number, pointerId: number) => {
+    const drag = moveDragRef.current;
+    if (!drag || drag.pointerId !== pointerId) return;
+    const resolved = resolvePointerFromClientPoint(clientX, clientY, { clamp: true });
+    if (!resolved) return;
+    const dx = resolved.cellX - drag.origin.x;
+    const dy = resolved.cellY - drag.origin.y;
+    if (dx === drag.delta.dx && dy === drag.delta.dy) return;
+    if (!drag.actionStarted) {
+      if (dx === 0 && dy === 0) return;
+      const undoStack = undoStackRef.current;
+      if (undoStack.length === MAX_HISTORY) undoStack.shift();
+      undoStack.push({
+        layers: cloneLayers(layersRef.current, totalCells),
+        activeLayerId: drag.layerId,
+        selection: cloneSelection(drag.sourceSelection),
+      });
+      redoStackRef.current = [];
+      actionInProgressRef.current = true;
+      actionModifiedRef.current = false;
+      updateHistoryState();
+      drag.actionStarted = true;
+    }
+    drag.delta = { dx, dy };
+    const nextPixels = dx === 0 && dy === 0
+      ? drag.sourcePixels.slice()
+      : translatePixels(drag.movePixels, gridWidth, gridHeight, dx, dy);
+    setMoveLayerPixels(drag.layerId, nextPixels);
+
+    let nextSelection: SelectionState | null = null;
+    if (drag.sourceSelection) {
+      if (dx === 0 && dy === 0) {
+        nextSelection = cloneSelection(drag.sourceSelection);
+      } else {
+        const sourceRect = drag.sourceSelection.rect;
+        const shiftedX = sourceRect.x + drag.sourceSelection.offset.dx + dx;
+        const shiftedY = sourceRect.y + drag.sourceSelection.offset.dy + dy;
+        const left = Math.max(0, shiftedX);
+        const top = Math.max(0, shiftedY);
+        const right = Math.min(gridWidth, shiftedX + sourceRect.width);
+        const bottom = Math.min(gridHeight, shiftedY + sourceRect.height);
+        if (right > left && bottom > top) {
+          const rect = { x: left, y: top, width: right - left, height: bottom - top };
+          nextSelection = {
+            rect,
+            offset: { dx: 0, dy: 0 },
+            pixels: captureSelectionPixels(rect, nextPixels),
+            isFloating: false,
+          };
+        }
+      }
+    }
+    selectionRef.current = nextSelection;
+    setSelection(nextSelection);
+  }, [captureSelectionPixels, gridHeight, gridWidth, resolvePointerFromClientPoint, setMoveLayerPixels, setSelection, totalCells, updateHistoryState]);
+
   const handlePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>, index: number) => {
       event.preventDefault();
+      const focusedElement = document.activeElement;
+      if (focusedElement instanceof HTMLInputElement && focusedElement.hasAttribute("data-brush-size-input")) {
+        focusedElement.blur();
+        ignoredCanvasPointerIdRef.current = event.pointerId;
+        return;
+      }
+      if (tool === "move") {
+        const resolved = resolvePointerFromPointerEvent(event, { clamp: true });
+        if (!resolved) return;
+        const currentSelection = cloneSelection(selectionRef.current);
+        let targetLayer = layersRef.current.find((layer) => layer.id === activeLayerId);
+        if (autoPickLayer && !currentSelection) {
+          for (let layerIndex = layersRef.current.length - 1; layerIndex >= 0; layerIndex -= 1) {
+            const candidate = layersRef.current[layerIndex];
+            const pixel = candidate.pixels[resolved.index];
+            if (candidate.visible && pixel !== null && pixel !== "transparent") {
+              targetLayer = candidate;
+              break;
+            }
+          }
+        }
+        if (!targetLayer) return;
+        const sourcePixels = targetLayer.pixels.slice();
+        const movePixels = sourcePixels.slice();
+        if (currentSelection?.isFloating) {
+          for (const pixel of currentSelection.pixels) {
+            const x = currentSelection.rect.x + currentSelection.offset.dx + pixel.relX;
+            const y = currentSelection.rect.y + currentSelection.offset.dy + pixel.relY;
+            if (isInBounds(x, y)) movePixels[coordsToIndex(x, y)] = pixel.color;
+          }
+        }
+        if (targetLayer.id !== activeLayerId) {
+          setActiveLayerId(targetLayer.id);
+          activeLayerPixelsRef.current = targetLayer.pixels;
+          setActiveLayerPixelsState(targetLayer.pixels);
+        }
+        moveDragRef.current = {
+          pointerId: event.pointerId,
+          layerId: targetLayer.id,
+          originalActiveLayerId: activeLayerId,
+          origin: { x: resolved.cellX, y: resolved.cellY },
+          delta: { dx: 0, dy: 0 },
+          sourcePixels,
+          movePixels,
+          sourceSelection: currentSelection,
+          previousUndo: undoStackRef.current.slice(),
+          previousRedo: redoStackRef.current.slice(),
+          actionStarted: false,
+        };
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+          // Window pointer listeners still complete the drag if capture fails.
+        }
+        return;
+      }
       if (tool === "rect-select") {
         const resolved = resolvePointerFromPointerEvent(event, { clamp: true });
         if (!resolved) return;
@@ -2181,8 +2354,7 @@ export function PixelPencil() {
 
       if (tool === "magnifier") {
         const direction = event.shiftKey ? "out" : zoomMode;
-        zoomFocusIndexRef.current = pointerIndex;
-        applyZoom(direction);
+        zoomAtClientPoint(direction, 1, event.clientX, event.clientY);
         return;
       }
 
@@ -2269,10 +2441,11 @@ export function PixelPencil() {
     },
     [
       applySelectionToLayer,
+      activeLayerId,
+      autoPickLayer,
       buildPreviewFromAppliedCells,
       activeColor,
       applyBrush,
-      applyZoom,
       beginAction,
       buildLinePreview,
       cancelSelection,
@@ -2283,6 +2456,8 @@ export function PixelPencil() {
       computeShapeCells,
       floodFill,
       gridWidth,
+      coordsToIndex,
+      isInBounds,
       lastPointedIndex,
       selectionContainsCell,
       previewToolEffects,
@@ -2296,11 +2471,13 @@ export function PixelPencil() {
       startStroke,
       tool,
       zoomMode,
+      zoomAtClientPoint,
   ],
   );
 
   const handleSelectionBackgroundPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>) => {
+      if (tool === "move") return;
       if (
         !selectionRef.current &&
         !selectionDraftOriginRef.current &&
@@ -2312,7 +2489,7 @@ export function PixelPencil() {
       selectionCancelClickRef.current = true;
       cancelSelection();
     },
-    [cancelSelection],
+    [cancelSelection, tool],
   );
 
   const finalizeRectSelectionPointerUp = useCallback(
@@ -2377,6 +2554,7 @@ export function PixelPencil() {
 
   const handlePointerEnter = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>, index: number) => {
+      if (ignoredCanvasPointerIdRef.current === event.pointerId) return;
       const resolved = resolvePointerFromPointerEvent(event, {
         clamp: isDrawingRef.current,
       });
@@ -2473,12 +2651,19 @@ export function PixelPencil() {
   const handlePointerMove = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>) => {
       const nativeEvent = event.nativeEvent;
+      if (ignoredCanvasPointerIdRef.current === nativeEvent.pointerId) return;
       const coalesced =
         typeof nativeEvent.getCoalescedEvents === "function"
           ? nativeEvent.getCoalescedEvents()
           : [];
       const samples =
         coalesced.length > 0 ? [...coalesced, nativeEvent] : [nativeEvent];
+
+      if (tool === "move" && moveDragRef.current) {
+        const lastSample = samples[samples.length - 1];
+        updateMoveDrag(lastSample.clientX, lastSample.clientY, nativeEvent.pointerId);
+        return;
+      }
 
       if (tool === "rect-select") {
         const lastSample = samples[samples.length - 1];
@@ -2555,6 +2740,7 @@ export function PixelPencil() {
       tool,
       updateShiftLinePreview,
       updateRectSelectionFromClientPoint,
+      updateMoveDrag,
       selectionMoveRef,
       selectionDraftOriginRef,
     ],
@@ -2563,6 +2749,15 @@ export function PixelPencil() {
   const handlePointerUp = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>) => {
       event.preventDefault();
+      if (ignoredCanvasPointerIdRef.current === event.pointerId) {
+        ignoredCanvasPointerIdRef.current = null;
+        return;
+      }
+      if (tool === "move" && moveDragRef.current) {
+        updateMoveDrag(event.clientX, event.clientY, event.pointerId);
+        finishMoveDrag(event.pointerId, false);
+        return;
+      }
       const handledSelectionPointerUp = finalizeRectSelectionPointerUp({
         clientX: event.clientX,
         clientY: event.clientY,
@@ -2626,6 +2821,7 @@ export function PixelPencil() {
       computeShapeCells,
       dragStartIndex,
       finalizeRectSelectionPointerUp,
+      finishMoveDrag,
       flushPointerQueue,
       hoverIndex,
       lastPointedIndex,
@@ -2636,8 +2832,61 @@ export function PixelPencil() {
       shapeType,
       stopStroke,
       tool,
+      updateMoveDrag,
     ],
   );
+
+  const handlePointerCancel = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (ignoredCanvasPointerIdRef.current === event.pointerId) {
+      ignoredCanvasPointerIdRef.current = null;
+      return;
+    }
+    finishMoveDrag(event.pointerId, true);
+  }, [finishMoveDrag]);
+
+  useEffect(() => {
+    const clearIgnoredPointer = (event: PointerEvent) => {
+      if (ignoredCanvasPointerIdRef.current === event.pointerId) {
+        ignoredCanvasPointerIdRef.current = null;
+      }
+    };
+    window.addEventListener("pointerup", clearIgnoredPointer);
+    window.addEventListener("pointercancel", clearIgnoredPointer);
+    return () => {
+      window.removeEventListener("pointerup", clearIgnoredPointer);
+      window.removeEventListener("pointercancel", clearIgnoredPointer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (tool !== "move") {
+      const drag = moveDragRef.current;
+      if (drag) finishMoveDrag(drag.pointerId, true);
+      return;
+    }
+    const onMove = (event: PointerEvent) => {
+      updateMoveDrag(event.clientX, event.clientY, event.pointerId);
+    };
+    const onUp = (event: PointerEvent) => {
+      updateMoveDrag(event.clientX, event.clientY, event.pointerId);
+      finishMoveDrag(event.pointerId, false);
+    };
+    const onCancel = (event: PointerEvent) => finishMoveDrag(event.pointerId, true);
+    const onBlur = () => {
+      const drag = moveDragRef.current;
+      if (drag) finishMoveDrag(drag.pointerId, true);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [finishMoveDrag, tool, updateMoveDrag]);
 
   const handlePointerLeave = useCallback(() => {
     if (!isDrawingRef.current) {
@@ -2787,6 +3036,7 @@ export function PixelPencil() {
 
   const brushPreview = useMemo(() => {
     if (
+      brushSizeDragging ||
       !previewToolEffects ||
       hoverIndex === null ||
       (tool !== "pencil" && tool !== "eraser")
@@ -2794,7 +3044,26 @@ export function PixelPencil() {
       return null;
     }
     return new Set(computeBrushIndices(hoverIndex));
-  }, [computeBrushIndices, hoverIndex, previewToolEffects, tool]);
+  }, [brushSizeDragging, computeBrushIndices, hoverIndex, previewToolEffects, tool]);
+
+  const brushSizePreview = useMemo(() => {
+    if (!brushSizeDragging || canvasViewport.width <= 0 || canvasViewport.height <= 0) return null;
+    const artworkLeft = renderOffsetX - scrollOriginX;
+    const artworkTop = renderOffsetY - scrollOriginY;
+    const visibleLeft = Math.max(0, artworkLeft);
+    const visibleRight = Math.min(canvasViewport.width, artworkLeft + contentWidth);
+    const visibleTop = Math.max(0, artworkTop);
+    const visibleBottom = Math.min(canvasViewport.height, artworkTop + contentHeight);
+    if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) return null;
+
+    const centerX = Math.min(gridWidth - 1, Math.max(0,
+      Math.floor(((visibleLeft + visibleRight) / 2 - artworkLeft) / displayCellSize),
+    ));
+    const centerY = Math.min(gridHeight - 1, Math.max(0,
+      Math.floor(((visibleTop + visibleBottom) / 2 - artworkTop) / displayCellSize),
+    ));
+    return new Set(computeBrushIndices(centerY * gridWidth + centerX));
+  }, [brushSizeDragging, canvasViewport.height, canvasViewport.width, computeBrushIndices, contentHeight, contentWidth, displayCellSize, gridHeight, gridWidth, renderOffsetX, renderOffsetY, scrollOriginX, scrollOriginY]);
 
   const reset = useCallback(() => {
     const isAlreadyEmpty = compositePixelsRef.current.every(
@@ -2839,6 +3108,7 @@ export function PixelPencil() {
   const HOTKEYS_MAP = useMemo(
     () => [
       { label: "Select", key: "R" },
+      { label: "Move", key: "M" },
       { label: "Pencil", key: "Q" },
       { label: "Eraser", key: "W" },
       { label: "Picker", key: "E" },
@@ -2846,6 +3116,8 @@ export function PixelPencil() {
       { label: "Bucket", key: "G" },
       { label: "Shape", key: "S" },
       { label: "Line", key: "L" },
+      { label: "Pan Canvas", key: "Two-finger scroll / Middle mouse drag" },
+      { label: "Zoom Canvas", key: "Pinch / Mouse wheel / Cmd/Win + Wheel" },
       { label: "Undo", key: "Ctrl/Cmd + Z" },
       { label: "Redo", key: "Ctrl/Cmd + Shift + Z" },
       { label: "Clear", key: "Ctrl/Cmd + Backspace" },
@@ -2934,6 +3206,7 @@ export function PixelPencil() {
       if (!wrapper) return;
       const target = event.target as Node | null;
       if (!target) return;
+      if (target instanceof Element && target.closest("[data-pixel-tool], [data-tool-settings]")) return;
       if (!wrapper.contains(target)) {
         cancelSelection();
       }
@@ -2956,29 +3229,101 @@ export function PixelPencil() {
     };
   }, [activeColor]);
 
-  const [isMobileLayersOpen, setIsMobileLayersOpen] = useState(false);
-  const [isMobileSettingsOpen, setIsMobileSettingsOpen] = useState(false);
+  const closeMobilePanel = useCallback(() => {
+    const button = mobilePanel === "layers" ? mobileLayersButtonRef.current : mobilePaletteButtonRef.current;
+    setMobilePanel(null);
+    button?.focus();
+  }, [mobilePanel]);
+
+  useEffect(() => {
+    if (!mobilePanel) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !event.defaultPrevented) {
+        closeMobilePanel();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [closeMobilePanel, mobilePanel]);
 
   return (
     <>
       <div className="flex h-screen flex-col overflow-hidden bg-zinc-950 text-zinc-50">
-        <section className="border-b border-zinc-900 px-4 py-2 md:px-6">
-          <div className="mx-auto max-w-4xl">
-            <Toolbox tools={TOOLS} selectedToolId={tool} onSelect={setTool} />
+        <section className="border-b border-zinc-900 px-3 py-3 md:px-8" aria-label="General actions">
+          <div className="flex flex-wrap items-center justify-start gap-3">
+            <button
+              type="button"
+              onClick={undo}
+              className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!canUndo}
+              aria-label="Undo"
+            >
+              Undo
+            </button>
+            <button
+              type="button"
+              onClick={redo}
+              className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!canRedo}
+              aria-label="Redo"
+            >
+              Redo
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenResetDialog}
+              className="rounded-full bg-zinc-50 px-4 py-2 text-sm font-medium text-zinc-900 transition-colors hover:bg-zinc-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 dark:bg-zinc-50"
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenSettingsDialog}
+              className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
+            >
+              Settings
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsHotkeysDialogOpen(true)}
+              className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
+            >
+              Hotkeys
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenSaveDialog}
+              className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
+            >
+              Save PNG
+            </button>
           </div>
         </section>
         <div className="flex flex-1 min-h-0 lg:max-h-full">
-          <aside className="hidden md:flex md:w-56 lg:w-60 flex-col border-r border-zinc-900 bg-zinc-950">
-            <div className="flex-1 overflow-y-auto p-4">
+          <aside className="hidden md:flex md:w-64 lg:w-72 flex-col border-r border-zinc-900 bg-zinc-950">
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
               <LayersPanel
                 layers={layers}
                 activeLayerId={activeLayerId}
                 onSelectLayer={handleSelectLayer}
                 onCreateLayer={handleCreateLayer}
                 onDeleteLayer={handleDeleteLayer}
+                onRenameLayer={handleRenameLayer}
                 onToggleVisibility={handleToggleLayerVisibility}
                 onReorderLayers={handleReorderLayers}
                 layerPreviews={layerPreviews}
+              />
+            </div>
+            <div className="shrink-0 border-t border-zinc-900 p-4">
+              <PalettePanel
+                paletteThemeId={paletteThemeId}
+                setPaletteThemeId={setPaletteThemeId}
+                currentPalette={currentPalette}
+                drawValueRef={drawValueRef}
+                setActiveColor={setActiveColor}
+                paletteColors={paletteColors}
+                activeColor={activeColor}
+                selectedColorStyles={selectedColorStyles}
               />
             </div>
             <div className="border-t border-zinc-900 p-4">
@@ -3005,7 +3350,7 @@ export function PixelPencil() {
             </div>
           </aside>
           <main className="flex flex-1 min-w-0 flex-col">
-            <div className="flex-1 overflow-auto px-3 py-4 md:px-8 lg:max-h-full">
+            <div className="relative min-h-0 flex-1 overflow-hidden">
               <div className="flex h-full w-full flex-col items-center justify-center">
                 <PixelGrid
                   gridWidth={gridWidth}
@@ -3017,16 +3362,19 @@ export function PixelPencil() {
                   showPixelGrid={showPixelGrid}
                   checkerSize={checkerSize}
                   previewToolEffects={previewToolEffects}
+                  dimStrokePreview={dimStrokePreview}
                   bucketPreview={bucketPreview}
                   brushPreview={brushPreview}
+                  brushSizePreview={brushSizePreview}
                   pathPreview={pathPreview}
+                  activeColor={activeColor}
                   drawValueRef={drawValueRef}
                   drawValueVersion={drawValueVersion}
                   tool={tool}
                   wrapperMaxWidth={availableWidth}
                   wrapperMaxHeight={availableHeight}
                   canvasScroll={canvasScroll}
-                  onScrollChange={setCanvasScrollClamped}
+                  onScrollChange={setCanvasScrollLimited}
                   onViewportResize={handleViewportResize}
                   onWheelZoom={handleWheelZoom}
                   selectionOverlay={selection}
@@ -3035,150 +3383,106 @@ export function PixelPencil() {
                   handlePointerEnter={handlePointerEnter}
                   handlePointerMove={handlePointerMove}
                   handlePointerUp={handlePointerUp}
+                  handlePointerCancel={handlePointerCancel}
                   handlePointerLeave={handlePointerLeave}
                   onBackgroundPointerDown={handleSelectionBackgroundPointerDown}
                 />
               </div>
-            </div>
-            <div className="md:hidden space-y-4 px-4 pb-6">
-              <section className="rounded-lg border border-zinc-900 bg-zinc-900">
-                <button
-                  type="button"
-                  onClick={() => setIsMobileLayersOpen((prev) => !prev)}
-                  aria-expanded={isMobileLayersOpen}
-                  className="flex w-full items-center justify-between px-4 py-3 text-sm font-semibold uppercase tracking-wide text-zinc-100"
+              {mobilePanel ? (
+                <section
+                  id={`mobile-${mobilePanel}-panel`}
+                  data-tool-settings
+                  aria-labelledby={`mobile-${mobilePanel}-title`}
+                  className="absolute inset-x-0 bottom-0 z-30 flex max-h-[60%] flex-col rounded-t-xl border border-b-0 border-zinc-700 bg-zinc-900 shadow-2xl md:hidden"
                 >
-                  <span>Layers</span>
-                  <span className="text-lg leading-none">
-                    {isMobileLayersOpen ? "−" : "+"}
-                  </span>
-                </button>
-                {isMobileLayersOpen ? (
-                  <div className="max-h-80 overflow-y-auto px-4 pb-4">
-                    <LayersPanel
-                      layers={layers}
-                      activeLayerId={activeLayerId}
-                      onSelectLayer={handleSelectLayer}
-                      onCreateLayer={handleCreateLayer}
-                      onDeleteLayer={handleDeleteLayer}
-                      onToggleVisibility={handleToggleLayerVisibility}
-                      onReorderLayers={handleReorderLayers}
-                      layerPreviews={layerPreviews}
-                    />
+                  <div className="flex shrink-0 items-center justify-between border-b border-zinc-700 px-4 py-2">
+                    <h2 id={`mobile-${mobilePanel}-title`} className="text-sm font-semibold uppercase tracking-wide text-zinc-100">
+                      {mobilePanel === "layers" ? "Layers" : "Palette"}
+                    </h2>
+                    <button
+                      type="button"
+                      onClick={closeMobilePanel}
+                      className="rounded-md px-3 py-2 text-sm font-medium text-zinc-100 hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200"
+                      aria-label={`Close ${mobilePanel}`}
+                    >
+                      Close
+                    </button>
                   </div>
-                ) : null}
-              </section>
-              <section className="rounded-lg border border-zinc-900 bg-zinc-900">
-                <button
-                  type="button"
-                  onClick={() => setIsMobileSettingsOpen((prev) => !prev)}
-                  aria-expanded={isMobileSettingsOpen}
-                  className="flex w-full items-center justify-between px-4 py-3 text-sm font-semibold uppercase tracking-wide text-zinc-100"
-                >
-                  <span>Tool Settings</span>
-                  <span className="text-lg leading-none">
-                    {isMobileSettingsOpen ? "−" : "+"}
-                  </span>
-                </button>
-                {isMobileSettingsOpen ? (
-                  <div className="max-h-80 overflow-y-auto px-4 pb-4">
-                    <ToolSettingsPanel
-                      currentTool={currentTool}
-                      brushSize={brushSize}
-                      onBrushSizeChange={setBrushSize}
-                      brushShape={brushShape}
-                      onBrushShapeChange={setBrushShape}
-                      shapeType={shapeType}
-                      onShapeTypeChange={setShapeType}
-                      shapeFilled={shapeFilled}
-                      onShapeFilledChange={setShapeFilled}
-                      zoomMode={zoomMode}
-                      onZoomModeChange={setZoomMode}
-                      paletteThemeId={paletteThemeId}
-                      setPaletteThemeId={setPaletteThemeId}
-                      currentPalette={currentPalette}
-                      drawValueRef={drawValueRef}
-                      setActiveColor={setActiveColor}
-                      paletteColors={paletteColors}
-                      selectedColorStyles={selectedColorStyles}
-                    />
+                  <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">
+                    {mobilePanel === "layers" ? (
+                      <LayersPanel
+                        layers={layers}
+                        activeLayerId={activeLayerId}
+                        onSelectLayer={handleSelectLayer}
+                        onCreateLayer={handleCreateLayer}
+                        onDeleteLayer={handleDeleteLayer}
+                        onRenameLayer={handleRenameLayer}
+                        onToggleVisibility={handleToggleLayerVisibility}
+                        onReorderLayers={handleReorderLayers}
+                        layerPreviews={layerPreviews}
+                      />
+                    ) : (
+                      <PalettePanel
+                        paletteThemeId={paletteThemeId}
+                        setPaletteThemeId={setPaletteThemeId}
+                        currentPalette={currentPalette}
+                        drawValueRef={drawValueRef}
+                        setActiveColor={setActiveColor}
+                        paletteColors={paletteColors}
+                        activeColor={activeColor}
+                        selectedColorStyles={selectedColorStyles}
+                      />
+                    )}
                   </div>
-                ) : null}
-              </section>
+                </section>
+              ) : null}
             </div>
-            <div className="border-t border-zinc-900 px-3 py-3 md:px-8">
-              <div className="flex flex-wrap items-center justify-center gap-3">
-                <button
-                  type="button"
-                  onClick={undo}
-                  className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!canUndo}
-                  aria-label="Undo"
-                >
-                  Undo
-                </button>
-                <button
-                  type="button"
-                  onClick={redo}
-                  className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!canRedo}
-                  aria-label="Redo"
-                >
-                  Redo
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenResetDialog}
-                  className="rounded-full bg-zinc-50 px-4 py-2 text-sm font-medium text-zinc-900 transition-colors hover:bg-zinc-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 dark:bg-zinc-50"
-                >
-                  Clear
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenSettingsDialog}
-                  className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
-                >
-                  Settings
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsHotkeysDialogOpen(true)}
-                  className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
-                >
-                  Hotkeys
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenSaveDialog}
-                  className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
-                >
-                  Save PNG
-                </button>
+            <nav data-tool-settings className="flex h-12 shrink-0 items-center gap-2 border-t border-zinc-900 px-4 md:hidden" aria-label="Canvas panels">
+              <button
+                ref={mobileLayersButtonRef}
+                type="button"
+                onClick={() => setMobilePanel((current) => current === "layers" ? null : "layers")}
+                aria-expanded={mobilePanel === "layers"}
+                aria-controls={mobilePanel === "layers" ? "mobile-layers-panel" : undefined}
+                className={`h-9 flex-1 rounded-md border px-3 text-sm font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 ${mobilePanel === "layers" ? "border-zinc-500 bg-zinc-700 text-white" : "border-zinc-700 bg-zinc-900 text-zinc-100 hover:bg-zinc-800"}`}
+              >
+                Layers
+              </button>
+              <button
+                ref={mobilePaletteButtonRef}
+                type="button"
+                onClick={() => setMobilePanel((current) => current === "palette" ? null : "palette")}
+                aria-expanded={mobilePanel === "palette"}
+                aria-controls={mobilePanel === "palette" ? "mobile-palette-panel" : undefined}
+                className={`h-9 flex-1 rounded-md border px-3 text-sm font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 ${mobilePanel === "palette" ? "border-zinc-500 bg-zinc-700 text-white" : "border-zinc-700 bg-zinc-900 text-zinc-100 hover:bg-zinc-800"}`}
+              >
+                Palette
+              </button>
+            </nav>
+            <section className="border-t border-zinc-900 px-4 py-2 md:px-6" aria-label="Tools">
+              <div className="mx-auto max-w-4xl">
+                <Toolbox tools={TOOLS} selectedToolId={tool} onSelect={setTool} />
               </div>
-            </div>
+            </section>
+            <section className="border-t border-zinc-900 px-4 md:px-6" aria-label="Tool settings">
+              <ToolSettingsPanel
+                currentTool={currentTool}
+                brushSize={brushSize}
+                onBrushSizeChange={setBrushSize}
+                onBrushSizeDragChange={setBrushSizeDragging}
+                brushShape={brushShape}
+                onBrushShapeChange={setBrushShape}
+                shapeType={shapeType}
+                onShapeTypeChange={setShapeType}
+                shapeFilled={shapeFilled}
+                onShapeFilledChange={setShapeFilled}
+                zoomMode={zoomMode}
+                onZoomModeChange={setZoomMode}
+                autoPickLayer={autoPickLayer}
+                onAutoPickLayerChange={setAutoPickLayer}
+              />
+            </section>
           </main>
-          <aside className="hidden md:flex md:w-72 lg:w-80 flex-col min-h-0 overflow-y-auto border-l border-zinc-900 bg-zinc-950 p-6">
-            <ToolSettingsPanel
-              currentTool={currentTool}
-              brushSize={brushSize}
-              onBrushSizeChange={setBrushSize}
-              brushShape={brushShape}
-              onBrushShapeChange={setBrushShape}
-              shapeType={shapeType}
-              onShapeTypeChange={setShapeType}
-              shapeFilled={shapeFilled}
-              onShapeFilledChange={setShapeFilled}
-              zoomMode={zoomMode}
-              onZoomModeChange={setZoomMode}
-              paletteThemeId={paletteThemeId}
-              setPaletteThemeId={setPaletteThemeId}
-              currentPalette={currentPalette}
-              drawValueRef={drawValueRef}
-              setActiveColor={setActiveColor}
-              paletteColors={paletteColors}
-              selectedColorStyles={selectedColorStyles}
-            />
-          </aside>
         </div>
       </div>
       <PixelPencilModals

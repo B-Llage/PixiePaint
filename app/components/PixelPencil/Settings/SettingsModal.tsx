@@ -13,6 +13,8 @@ export function SettingsModal( { handleCloseSettingsDialog }: SettingsModalProps
     const {
         previewToolEffects,
         setPreviewToolEffects,
+        dimStrokePreview,
+        setDimStrokePreview,
         gridWidth,
         setGridWidth,
         gridHeight,
@@ -47,7 +49,7 @@ export function SettingsModal( { handleCloseSettingsDialog }: SettingsModalProps
                     Preview Tool Effects
                   </span>
                   <p className="text-sm text-zinc-600 dark:text-zinc-300">
-                    Show live tool previews while hovering over the canvas.
+                    Show live tool previews while hovering over or drawing on the canvas.
                   </p>
                 </div>
                 <label className="inline-flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-300">
@@ -55,6 +57,28 @@ export function SettingsModal( { handleCloseSettingsDialog }: SettingsModalProps
                     type="checkbox"
                     checked={previewToolEffects}
                     onChange={(event) => setPreviewToolEffects(event.target.checked)}
+                    className="h-4 w-4 rounded border-zinc-300 text-black focus:ring-black dark:border-zinc-600 dark:text-white dark:focus:ring-white"
+                  />
+                  <span className="font-medium text-zinc-900 dark:text-zinc-50">
+                    Enabled
+                  </span>
+                </label>
+              </div>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <label htmlFor="dim-stroke-preview" className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                    Dim Stroke Preview
+                  </label>
+                  <p className="text-sm text-zinc-600 dark:text-zinc-300">
+                    Darken tool previews while hovering or drawing. When off, previews show the color that will be applied.
+                  </p>
+                </div>
+                <label className="inline-flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-300">
+                  <input
+                    id="dim-stroke-preview"
+                    type="checkbox"
+                    checked={dimStrokePreview}
+                    onChange={(event) => setDimStrokePreview(event.target.checked)}
                     className="h-4 w-4 rounded border-zinc-300 text-black focus:ring-black dark:border-zinc-600 dark:text-white dark:focus:ring-white"
                   />
                   <span className="font-medium text-zinc-900 dark:text-zinc-50">

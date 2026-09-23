@@ -1,17 +1,39 @@
-name: Version Bump
+name: Checks and Version Bump
 
 on:
+  pull_request:
   push:
     branches:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  bump:
-    if: github.actor != 'github-actions[bot]'
+  checks:
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checks
+        run: npm run check
+
+  bump:
+    needs: checks
+    if: github.event_name == 'push' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,6 +45,16 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require("fs");
+            const { execFileSync } = require("child_process");
+            const packageVersion = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+            const matchingTag = execFileSync("git", ["tag", "--list", `v${packageVersion}`], { encoding: "utf8" });
+            if (!matchingTag.trim()) {
+              core.setOutput("prepared_version", packageVersion);
+              core.setOutput("type", "");
+              return;
+            }
+
             const commits = context.payload.commits || [];
             let bump = null;
             for (const commit of commits) {
@@ -41,11 +73,11 @@ jobs:
             core.setOutput("type", bump ?? "");
 
       - name: Stop if no bump
-        if: steps.bump.outputs.type == ''
+        if: steps.bump.outputs.type == '' && steps.bump.outputs.prepared_version == ''
         run: echo "No version bump required."
 
       - name: Configure git
-        if: steps.bump.outputs.type != ''
+        if: steps.bump.outputs.type != '' || steps.bump.outputs.prepared_version != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -55,7 +87,13 @@ jobs:
         run: |
           npm version ${{ steps.bump.outputs.type }} -m "chore(release): v%s"
 
+      - name: Tag prepared version
+        if: steps.bump.outputs.prepared_version != ''
+        env:
+          PREPARED_VERSION: ${{ steps.bump.outputs.prepared_version }}
+        run: git tag -a "v$PREPARED_VERSION" -m "v$PREPARED_VERSION"
+
       - name: Push changes
-        if: steps.bump.outputs.type != ''
+        if: steps.bump.outputs.type != '' || steps.bump.outputs.prepared_version != ''
         run: |
           git push origin main --follow-tags

@@ -5,7 +5,6 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type Dispatch,
   type ReactNode,
@@ -19,6 +18,8 @@ type CheckerSizeOption = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 interface PixelPencilSettingsContextValue {
   previewToolEffects: boolean;
   setPreviewToolEffects: Dispatch<SetStateAction<boolean>>;
+  dimStrokePreview: boolean;
+  setDimStrokePreview: Dispatch<SetStateAction<boolean>>;
   canvasPixelSize: CanvasPixelSizeOption;
   setCanvasPixelSize: Dispatch<SetStateAction<CanvasPixelSizeOption>>;
   gridWidth: GridDimensionOption;
@@ -42,6 +43,7 @@ export function PixelPencilSettingsProvider({
   children: ReactNode;
 }) {
   const [previewToolEffects, setPreviewToolEffects] = useState(true);
+  const [dimStrokePreview, setDimStrokePreview] = useState(false);
   const [canvasPixelSize, setCanvasPixelSize] =
     useState<CanvasPixelSizeOption>(8);
   const [gridWidth, setGridWidth] = useState<GridDimensionOption>(32);
@@ -49,67 +51,75 @@ export function PixelPencilSettingsProvider({
   const [showPixelGrid, setShowPixelGrid] = useState(false);
   const [checkerSize, setCheckerSize] = useState<CheckerSizeOption>(8);
 
-  const hasHydratedRef = useRef(false);
+  const [hasHydrated, setHasHydrated] = useState(false);
 
   useEffect(() => {
-    if (typeof window === "undefined" || hasHydratedRef.current) return;
-    hasHydratedRef.current = true;
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as Partial<{
-        previewToolEffects: boolean;
-        canvasPixelSize: CanvasPixelSizeOption;
-        gridWidth: GridDimensionOption;
-        gridHeight: GridDimensionOption;
-        showPixelGrid: boolean;
-        checkerSize: CheckerSizeOption;
-      }>;
-      if (typeof parsed.previewToolEffects === "boolean") {
-        setPreviewToolEffects(parsed.previewToolEffects);
+    const timer = window.setTimeout(() => {
+      try {
+        const raw = window.localStorage.getItem(STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw) as Partial<{
+          previewToolEffects: boolean;
+          dimStrokePreview: boolean;
+          canvasPixelSize: CanvasPixelSizeOption;
+          gridWidth: GridDimensionOption;
+          gridHeight: GridDimensionOption;
+          showPixelGrid: boolean;
+          checkerSize: CheckerSizeOption;
+        }>;
+        if (typeof parsed.previewToolEffects === "boolean") {
+          setPreviewToolEffects(parsed.previewToolEffects);
+        }
+        if (typeof parsed.dimStrokePreview === "boolean") {
+          setDimStrokePreview(parsed.dimStrokePreview);
+        }
+        if (
+          parsed.canvasPixelSize &&
+          (CANVAS_PIXEL_SIZE_OPTIONS as readonly number[]).includes(
+            parsed.canvasPixelSize,
+          )
+        ) {
+          setCanvasPixelSize(parsed.canvasPixelSize);
+        }
+        if (
+          parsed.gridWidth &&
+          (GRID_DIMENSION_OPTIONS as readonly number[]).includes(
+            parsed.gridWidth,
+          )
+        ) {
+          setGridWidth(parsed.gridWidth);
+        }
+        if (
+          parsed.gridHeight &&
+          (GRID_DIMENSION_OPTIONS as readonly number[]).includes(
+            parsed.gridHeight,
+          )
+        ) {
+          setGridHeight(parsed.gridHeight);
+        }
+        if (typeof parsed.showPixelGrid === "boolean") {
+          setShowPixelGrid(parsed.showPixelGrid);
+        }
+        if (
+          parsed.checkerSize &&
+          (CHECKER_SIZE_OPTIONS as readonly number[]).includes(parsed.checkerSize)
+        ) {
+          setCheckerSize(parsed.checkerSize);
+        }
+      } catch {
+        // Ignore malformed or unavailable storage.
+      } finally {
+        setHasHydrated(true);
       }
-      if (
-        parsed.canvasPixelSize &&
-        (CANVAS_PIXEL_SIZE_OPTIONS as readonly number[]).includes(
-          parsed.canvasPixelSize,
-        )
-      ) {
-        setCanvasPixelSize(parsed.canvasPixelSize);
-      }
-      if (
-        parsed.gridWidth &&
-        (GRID_DIMENSION_OPTIONS as readonly number[]).includes(
-          parsed.gridWidth,
-        )
-      ) {
-        setGridWidth(parsed.gridWidth);
-      }
-      if (
-        parsed.gridHeight &&
-        (GRID_DIMENSION_OPTIONS as readonly number[]).includes(
-          parsed.gridHeight,
-        )
-      ) {
-        setGridHeight(parsed.gridHeight);
-      }
-      if (typeof parsed.showPixelGrid === "boolean") {
-        setShowPixelGrid(parsed.showPixelGrid);
-      }
-      if (
-        parsed.checkerSize &&
-        (CHECKER_SIZE_OPTIONS as readonly number[]).includes(parsed.checkerSize)
-      ) {
-        setCheckerSize(parsed.checkerSize);
-      }
-    } catch {
-      // ignore malformed storage
-    }
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (!hasHydrated) return;
     const payload = JSON.stringify({
       previewToolEffects,
+      dimStrokePreview,
       canvasPixelSize,
       gridWidth,
       gridHeight,
@@ -119,17 +129,21 @@ export function PixelPencilSettingsProvider({
     window.localStorage.setItem(STORAGE_KEY, payload);
   }, [
     previewToolEffects,
+    dimStrokePreview,
     canvasPixelSize,
     gridWidth,
     gridHeight,
     showPixelGrid,
     checkerSize,
+    hasHydrated,
   ]);
 
   const value = useMemo(
     () => ({
       previewToolEffects,
       setPreviewToolEffects,
+      dimStrokePreview,
+      setDimStrokePreview,
       canvasPixelSize,
       setCanvasPixelSize,
       gridWidth,
@@ -143,6 +157,7 @@ export function PixelPencilSettingsProvider({
     }),
     [
       previewToolEffects,
+      dimStrokePreview,
       canvasPixelSize,
       gridWidth,
       gridHeight,
