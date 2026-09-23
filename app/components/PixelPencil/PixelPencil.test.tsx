@@ -177,6 +177,37 @@ describe("PixelPencil move tool", () => {
 });
 
 describe("PixelPencil viewport", () => {
+  it("shows the common drawing tools first and keeps tool selection working", () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+
+    const tools = screen.getByRole("region", { name: "Tools" });
+    const settings = screen.getByRole("region", { name: "Tool settings" });
+    expect(within(tools).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Pencil", "Eraser", "Bucket", "Picker", "Line", "Shape", "Select", "Move", "Magnifier",
+    ]);
+    expect(within(settings).getByText("Brush Size")).not.toBeNull();
+
+    fireEvent.click(within(tools).getByRole("button", { name: "Bucket" }));
+    expect(within(settings).queryByText("Brush Size")).toBeNull();
+    fireEvent.click(within(tools).getByRole("button", { name: "Line" }));
+    expect(within(settings).getByText("Brush Size")).not.toBeNull();
+  });
+
+  it("keeps the general actions and tools on horizontally scrollable rows", () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+
+    const actions = screen.getByRole("region", { name: "General actions" });
+    const tools = screen.getByRole("region", { name: "Tools" });
+    expect(actions.className).toContain("overflow-x-auto");
+    expect(actions.firstElementChild?.className).toContain("flex-nowrap");
+    expect(actions.firstElementChild?.className).toContain("[&>button]:shrink-0");
+    expect(within(actions).getByRole("button", { name: "Save PNG" })).not.toBeNull();
+    expect(tools.className).toContain("overflow-x-auto");
+    expect(tools.firstElementChild?.firstElementChild?.className).toContain("flex-nowrap");
+    const bucket = within(tools).getByRole("button", { name: "Bucket" });
+    expect(bucket.parentElement?.className).toContain("shrink-0");
+  });
+
   it("opens mobile controls over the canvas without changing its viewport or scale", () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({
       matches: true,
