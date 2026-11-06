@@ -8,9 +8,13 @@ Run `npm run check` before considering a change complete. It runs lint, TypeScri
 
 ## Releases
 
-The current release notes are in [RELEASE_NOTES.md](./RELEASE_NOTES.md), and the in-app changelog is in `app/components/PixelPencil/Settings/ChangelogModal.tsx`. Keep both aligned with the version in `package.json` and `package-lock.json`.
+Changelog entries live in [app/changelog.json](./app/changelog.json). The in-app changelog and the GitHub Release notes are both generated from it, and a test checks that the newest entry matches the version in `package.json`.
 
-The GitHub workflow runs checks before releasing from `main`. If the package version has been prepared ahead of time and has no matching tag, it tags that version without bumping it again. Otherwise, commits starting with `major:`, `feature:`, or `patch:` trigger the corresponding automatic version bump.
+To release:
+
+1. Bump the version with `npm version x.y.z --no-git-tag-version` (updates `package.json` and `package-lock.json`).
+2. Add a matching entry at the top of `app/changelog.json`.
+3. Merge to `main`. The workflow runs the checks, then creates the `vx.y.z` tag and a GitHub Release with that entry's notes if the tag does not exist yet. Preview the notes with `node scripts/release-notes.mjs x.y.z`.
 
 ## Getting Started
 

@@ -17,7 +17,7 @@ export function ActionRequestModal({
   renderBody,
   handleClose,
   handleConfirm,
-  confirmText = "Yes, clear",
+  confirmText = "Confirm",
   cancelText = "Cancel",
   hideCancelButton = false,
 }: ActionRequestModalProps) {

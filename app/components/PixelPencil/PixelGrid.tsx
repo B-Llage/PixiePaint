@@ -14,8 +14,9 @@ import {
   TRANSPARENT_DARK,
   TRANSPARENT_LIGHT,
 } from "./PixelPencil.constants";
-import { PaletteColor, PixelValue } from "./PixelPencilTypes";
+import { PaletteColor, PixelValue, SelectionRect, SelectionState } from "./PixelPencilTypes";
 import { clampPan, getPanBounds, includePanOffset } from "./canvas-pan";
+import { checkerboardStyle } from "./checkerboard";
 
 interface PixelGridProps {
   gridWidth: number;
@@ -36,6 +37,9 @@ interface PixelGridProps {
   drawValueRef: MutableRefObject<PixelValue>;
   drawValueVersion: number;
   tool: string;
+  toolCursorIcon: string;
+  toolCursorHotspot: { x: number; y: number };
+  useToolAsMousePointer: boolean;
   wrapperMaxWidth: number;
   wrapperMaxHeight: number;
   canvasScroll: { x: number; y: number };
@@ -46,15 +50,8 @@ interface PixelGridProps {
     steps: number,
     point: { x: number; y: number },
   ) => void;
-  selectionOverlay:
-    | {
-        rect: { x: number; y: number; width: number; height: number };
-        offset: { dx: number; dy: number };
-        pixels: { relX: number; relY: number; color: PixelValue }[];
-        isFloating: boolean;
-      }
-    | null;
-  selectionPreviewRect: { x: number; y: number; width: number; height: number } | null;
+  selectionOverlay: SelectionState | null;
+  selectionPreviewRect: SelectionRect | null;
   handlePointerDown: (
     event: ReactPointerEvent<HTMLCanvasElement>,
     index: number,
@@ -78,6 +75,11 @@ const SELECTION_BORDER_THICKNESS = 0.1;
 const DESK_BACKGROUND = "#18181b";
 const ZOOM_WHEEL_THRESHOLD = 60;
 const ZOOM_GESTURE_THRESHOLD = 0.15;
+const DIM_PREVIEW_OPACITY = 0.7;
+// WheelEvent.deltaMode values.
+const DOM_DELTA_LINE = 1;
+const DOM_DELTA_PAGE = 2;
+const WHEEL_LINE_HEIGHT_PX = 16;
 
 type SafariGestureEvent = Event & {
   scale: number;
@@ -85,10 +87,17 @@ type SafariGestureEvent = Event & {
   clientY?: number;
 };
 
+/** Converts a wheel delta to CSS pixels for the event's deltaMode. */
+function wheelDeltaUnit(deltaMode: number, viewportHeight: number): number {
+  if (deltaMode === DOM_DELTA_LINE) return WHEEL_LINE_HEIGHT_PX;
+  if (deltaMode === DOM_DELTA_PAGE) return viewportHeight;
+  return 1;
+}
+
 function discreteWheelSteps(event: WheelEvent): number {
   if (event.deltaX !== 0 || event.deltaY === 0) return 0;
-  if (event.deltaMode === 1) return Math.max(1, Math.round(Math.abs(event.deltaY) / 3));
-  if (event.deltaMode === 2) return Math.max(1, Math.round(Math.abs(event.deltaY)));
+  if (event.deltaMode === DOM_DELTA_LINE) return Math.max(1, Math.round(Math.abs(event.deltaY) / 3));
+  if (event.deltaMode === DOM_DELTA_PAGE) return Math.max(1, Math.round(Math.abs(event.deltaY)));
 
   // Browsers expose no device type. Legacy wheelDeltaY identifies wheel notches
   // where available; ambiguous pixel-mode events remain two-finger panning.
@@ -116,6 +125,9 @@ export function PixelGrid({
   activeColor,
   drawValueRef,
   tool,
+  toolCursorIcon,
+  toolCursorHotspot,
+  useToolAsMousePointer,
   wrapperMaxWidth,
   wrapperMaxHeight,
   canvasScroll,
@@ -178,10 +190,7 @@ export function PixelGrid({
   );
 
   const getSelectionStyle = useCallback(
-    (
-      rect: { x: number; y: number; width: number; height: number },
-      offset: { dx: number; dy: number } = { dx: 0, dy: 0 },
-    ) => {
+    (rect: SelectionRect, offset: { dx: number; dy: number } = { dx: 0, dy: 0 }) => {
       const left =
         (rect.x + offset.dx) * displayCellSize - scrollOriginX + renderOffsetX;
       const top =
@@ -339,7 +348,7 @@ export function PixelGrid({
             : (pixel as PaletteColor);
 
         const opacity = dimStrokePreview &&
-          (showPathPreview || isBucketPreviewCell || isBrushPreviewCell) ? 0.7 : 1;
+          (showPathPreview || isBucketPreviewCell || isBrushPreviewCell) ? DIM_PREVIEW_OPACITY : 1;
 
         context.globalAlpha = opacity;
         context.fillStyle = cellBackgroundColor;
@@ -644,7 +653,7 @@ export function PixelGrid({
           wheelZoomDeltaRef.current = 0;
           onWheelZoom(event.deltaY < 0 ? "in" : "out", discreteSteps, point);
         } else {
-          const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.height : 1;
+          const unit = wheelDeltaUnit(event.deltaMode, viewport.height);
           accumulateZoom(wheelZoomDeltaRef, event.deltaY * unit, ZOOM_WHEEL_THRESHOLD, point);
         }
         return;
@@ -654,7 +663,7 @@ export function PixelGrid({
         hoverIndexRef.current = null;
         handlePointerLeave();
       }
-      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.height : 1;
+      const unit = wheelDeltaUnit(event.deltaMode, viewport.height);
       const deltaX = event.deltaX * unit;
       const deltaY = event.deltaY * unit;
       onScrollChange((previous) => ({ x: previous.x + deltaX, y: previous.y + deltaY }));
@@ -822,7 +831,6 @@ export function PixelGrid({
   );
 
   return (
-    <>
     <div
       ref={gridWrapperRef}
       className="relative flex h-full w-full min-h-0 touch-none overflow-hidden items-center justify-center"
@@ -842,6 +850,9 @@ export function PixelGrid({
           width: `${Math.max(1, viewport.width)}px`,
           height: `${Math.max(1, viewport.height)}px`,
           imageRendering: "pixelated",
+          cursor: useToolAsMousePointer
+            ? `url("${toolCursorIcon}") ${toolCursorHotspot.x} ${toolCursorHotspot.y}, auto`
+            : undefined,
         }}
         onContextMenu={(event) => event.preventDefault()}
         onPointerDown={handleCanvasPointerDown}
@@ -893,12 +904,9 @@ export function PixelGrid({
                         top,
                         width: displayCellSize,
                         height: displayCellSize,
-                        backgroundColor: isTransparent ? "transparent" : (pixel.color as string),
-                        backgroundImage: isTransparent
-                          ? "linear-gradient(45deg, rgba(0,0,0,0.2) 25%, transparent 25%, transparent 75%, rgba(0,0,0,0.2) 75%, rgba(0,0,0,0.2)), linear-gradient(45deg, rgba(0,0,0,0.2) 25%, transparent 25%, transparent 75%, rgba(0,0,0,0.2) 75%, rgba(0,0,0,0.2))"
-                          : undefined,
-                        backgroundSize: isTransparent ? "6px 6px" : undefined,
-                        backgroundPosition: isTransparent ? "0 0, 3px 3px" : undefined,
+                        ...(isTransparent
+                          ? { backgroundColor: "transparent", ...checkerboardStyle(6, "rgba(0,0,0,0.2)") }
+                          : { backgroundColor: pixel.color }),
                       }}
                     />
                   );
@@ -937,96 +945,5 @@ export function PixelGrid({
         </div>
       )}
     </div>
-    <style jsx global>{`
-      @keyframes pixelSelectionDash {
-        from {
-          background-position: 0 0, 0 0, 0 100%, 100% 0;
-        }
-        to {
-          background-position: 8px 0, 0 8px, -8px 100%, 100% -8px;
-        }
-      }
-
-      @keyframes pixelSelectionDashSolid {
-        from {
-          background-position: 0 0, 0 0, 0 100%, 100% 0, 6px 0, 0 6px, 6px 100%, 100% 6px;
-        }
-        to {
-          background-position: 12px 0, 0 12px, -12px 100%, 100% -12px, 18px 0, 0 18px, -6px 100%, 100% -6px;
-        }
-      }
-
-      .selection-border {
-        position: absolute;
-        box-sizing: border-box;
-        background-image:
-          repeating-linear-gradient(
-            90deg,
-            rgba(255,255,255,0.95) 0,
-            rgba(255,255,255,0.95) 4px,
-            transparent 4px,
-            transparent 8px
-          ),
-          repeating-linear-gradient(
-            180deg,
-            rgba(255,255,255,0.95) 0,
-            rgba(255,255,255,0.95) 4px,
-            transparent 4px,
-            transparent 8px
-          ),
-          repeating-linear-gradient(
-            90deg,
-            rgba(15,23,42,0.95) 0,
-            rgba(15,23,42,0.95) 4px,
-            transparent 4px,
-            transparent 8px
-          ),
-          repeating-linear-gradient(
-            180deg,
-            rgba(15,23,42,0.95) 0,
-            rgba(15,23,42,0.95) 4px,
-            transparent 4px,
-            transparent 8px
-          );
-        background-size: 8px 2px, 2px 8px, 8px 2px, 2px 8px;
-        background-repeat: repeat-x, repeat-y, repeat-x, repeat-y;
-        background-position: 0 0, 0 0, 0 100%, 100% 0;
-        animation: pixelSelectionDash 0.5s linear infinite;
-      }
-
-      .selection-border--preview {
-        opacity: 0.75;
-      }
-
-      .selection-border--solid {
-        background-image:
-          linear-gradient(90deg, rgba(15,23,42,0.9) 50%, transparent 50%),
-          linear-gradient(180deg, rgba(15,23,42,0.9) 50%, transparent 50%),
-          linear-gradient(90deg, rgba(15,23,42,0.9) 50%, transparent 50%),
-          linear-gradient(180deg, rgba(15,23,42,0.9) 50%, transparent 50%),
-          linear-gradient(90deg, rgba(255,255,255,0.95) 50%, transparent 50%),
-          linear-gradient(180deg, rgba(255,255,255,0.95) 50%, transparent 50%),
-          linear-gradient(90deg, rgba(255,255,255,0.95) 50%, transparent 50%),
-          linear-gradient(180deg, rgba(255,255,255,0.95) 50%, transparent 50%);
-        background-size: 12px 2px, 2px 12px, 12px 2px, 2px 12px, 12px 2px, 2px 12px, 12px 2px, 2px 12px;
-        background-position: 0 0, 0 0, 0 100%, 100% 0, 6px 0, 0 6px, 6px 100%, 100% 6px;
-        animation: pixelSelectionDashSolid 0.75s linear infinite;
-      }
-
-      .selection-preview-fill {
-        position: absolute;
-        box-sizing: border-box;
-        background: rgba(59, 130, 246, 0.2);
-        border: 1px solid rgba(37, 99, 235, 0.9);
-        box-shadow:
-          inset 0 0 0 1px rgba(37, 99, 235, 0.4),
-          0 0 0 1px rgba(15, 23, 42, 0.35);
-      }
-
-      .selection-floating-pixel {
-        position: absolute;
-      }
-    `}</style>
-  </>
-);
+  );
 }

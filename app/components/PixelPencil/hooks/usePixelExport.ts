@@ -1,8 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 
 import { EXPORT_SCALES } from "../PixelPencil.constants";
-
-type PixelValue = string | null;
+import type { PixelValue } from "../PixelPencilTypes";
 
 interface UsePixelExportParams {
   gridWidth: number;

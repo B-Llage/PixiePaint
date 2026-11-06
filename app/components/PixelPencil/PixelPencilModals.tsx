@@ -72,6 +72,7 @@ export function PixelPencilModals({
                 </span>
                 <div className="flex items-center justify-center rounded-lg border border-dashed border-zinc-300 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/50">
                   {previewDataUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element -- data URL preview; next/image cannot optimize it
                     <img
                       src={previewDataUrl}
                       alt="PNG preview"
@@ -132,13 +133,11 @@ export function PixelPencilModals({
       )}
 
       {isSettingsDialogOpen && (
-        <SettingsModal handleCloseSettingsDialog={handleCloseSettingsDialog} />
+        <SettingsModal onClose={handleCloseSettingsDialog} />
       )}
 
       {isChangelogDialogOpen && (
-        <ChangelogModal
-          handleCloseChangelogDialog={handleCloseChangelogDialog}
-        />
+        <ChangelogModal onClose={handleCloseChangelogDialog} />
       )}
 
       {isHotkeysDialogOpen && (
@@ -169,6 +168,7 @@ export function PixelPencilModals({
           message="This will erase the entire grid. Are you sure you want to continue?"
           handleClose={handleCloseResetDialog}
           handleConfirm={handleConfirmReset}
+          confirmText="Yes, clear"
         />
       )}
     </>
