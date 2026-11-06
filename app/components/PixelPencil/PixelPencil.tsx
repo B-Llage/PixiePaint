@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent, SetStateAction } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import {
   BrushShape,
   Layer,
@@ -18,7 +18,7 @@ import {
 import { PencilTool, TOOLS, type ToolId } from "./PixelPencilTools";
 import { PixelPencilPalettes } from "./PixelPencilPalettes";
 import { CANVAS_PIXEL_SIZE_OPTIONS, usePixelPencilSettings } from "./context/PixelPencilSettingsContext";
-import { MAX_ZOOM_SCALE } from "./PixelPencil.constants";
+import { MIN_CELL_SIZE_DESKTOP } from "./PixelPencil.constants";
 import { usePixelExport } from "./hooks/usePixelExport";
 import { Toolbox } from "./Toolbox";
 import { ToolSettingsPanel } from "./ToolSettingsPanel";
@@ -43,11 +43,11 @@ import {
   computeShapeCells as computeShapeCellsOnGrid,
   traceWorldSegment as traceWorldSegmentOnGrid,
 } from "./grid-geometry";
-import { getPanBounds, includePanOffset } from "./canvas-pan";
 import { checkerboardStyle } from "./checkerboard";
 import { useEscapeKey } from "./hooks/useEscapeKey";
 import { useStateWithRef } from "./hooks/useStateWithRef";
 import { useEditorHistory, type HistoryStacks, type LayerSnapshot } from "./hooks/useEditorHistory";
+import { useCanvasViewport } from "./hooks/useCanvasViewport";
 import packageJson from "../../../package.json";
 
 const PALETTE_THEMES: readonly PaletteTheme[] = PixelPencilPalettes;
@@ -56,8 +56,6 @@ const APP_VERSION = packageJson.version;
 // Below Tailwind's `md` breakpoint the Layers and Palette panels become bottom sheets.
 const MOBILE_MEDIA_QUERY = "(max-width: 767px)";
 const LAYER_PREVIEW_MAX_SIZE = 64; // px, longest side of a layer thumbnail
-const MIN_CELL_SIZE_MOBILE = 1;
-const MIN_CELL_SIZE_DESKTOP = 4;
 // A 32-cell grid defaults to 16px cells; other grid sizes scale to keep a similar footprint.
 const AUTO_CELL_SIZE_REFERENCE_GRID = 32;
 const AUTO_CELL_SIZE_REFERENCE_CELL = 16;
@@ -155,7 +153,6 @@ export function PixelPencil() {
   const [isSettingsDialogOpen, setIsSettingsDialogOpen] = useState(false);
   const [isChangelogDialogOpen, setIsChangelogDialogOpen] = useState(false);
   const [isHotkeysDialogOpen, setIsHotkeysDialogOpen] = useState(false);
-  const [zoomScale, setZoomScale] = useState(1);
   const [zoomMode, setZoomMode] = useState<ZoomMode>("in");
   const isDrawingRef = useRef(false);
   const drawValueRef = useRef<PixelValue>(PALETTE_THEMES[0].colors[0]);
@@ -190,11 +187,6 @@ export function PixelPencil() {
   const moveDragRef = useRef<MoveDrag | null>(null);
   const [dragStartIndex, setDragStartIndex] = useState<number | null>(null);
   const [pathPreview, setPathPreview] = useState<Set<number> | null>(null);
-  const [availableWidth, setAvailableWidth] = useState<number>(0);
-  const [availableHeight, setAvailableHeight] = useState<number>(0);
-  const [canvasScroll, setCanvasScroll] = useState({ x: 0, y: 0 });
-  const [zoomPanException, setZoomPanException] = useState(false);
-  const [canvasViewport, setCanvasViewport] = useState({ width: 0, height: 0 });
   const [selection, setSelection, selectionRef] = useStateWithRef<SelectionState | null>(null);
   const [selectionPreviewRect, setSelectionPreviewRect] = useState<SelectionRect | null>(null);
   const prevDimensionsRef = useRef({ width: gridWidth, height: gridHeight });
@@ -706,92 +698,31 @@ export function PixelPencil() {
     indexToCoords,
   });
 
-  const baseCellSize = useMemo(() => {
-    if (!availableWidth) {
-      return canvasPixelSize;
-    }
-    const maxCellSizeWidth = Math.floor(availableWidth / gridWidth);
-
-    const dimensionCandidates: number[] = [];
-    if (Number.isFinite(maxCellSizeWidth) && maxCellSizeWidth > 0) {
-      dimensionCandidates.push(maxCellSizeWidth);
-    }
-
-    if (availableHeight) {
-      const maxCellSizeHeight = Math.floor(availableHeight / gridHeight);
-      if (Number.isFinite(maxCellSizeHeight) && maxCellSizeHeight > 0) {
-        dimensionCandidates.push(maxCellSizeHeight);
-      }
-    }
-
-    if (!dimensionCandidates.length) {
-      return canvasPixelSize;
-    }
-
-    const dimensionLimit = Math.min(...dimensionCandidates);
-    const minCellSize = isMobile ? MIN_CELL_SIZE_MOBILE : MIN_CELL_SIZE_DESKTOP;
-    const clamped = Math.max(minCellSize, dimensionLimit);
-    return Math.min(canvasPixelSize, clamped);
-  }, [
-    availableHeight,
+  const {
     availableWidth,
-    canvasPixelSize,
-    gridHeight,
+    availableHeight,
+    canvasViewport,
+    canvasScroll,
+    displayCellSize,
+    contentWidth,
+    contentHeight,
+    renderOffsetX,
+    renderOffsetY,
+    scrollOriginX,
+    scrollOriginY,
+    setCanvasScroll: setCanvasScrollLimited,
+    handleViewportResize,
+    resolvePositionFromClientPoint,
+    zoomAtClientPoint,
+    handleWheelZoom,
+  } = useCanvasViewport({
     gridWidth,
+    gridHeight,
+    canvasPixelSize,
     isMobile,
-  ]);
-  const displayCellSize = useMemo(
-    () => baseCellSize * zoomScale,
-    [baseCellSize, zoomScale],
-  );
-  const contentWidth = gridWidth * displayCellSize;
-  const contentHeight = gridHeight * displayCellSize;
-  const renderOffsetX =
-    canvasViewport.width > 0 && contentWidth > 0 && contentWidth <= canvasViewport.width
-      ? (canvasViewport.width - contentWidth) / 2
-      : 0;
-  const renderOffsetY =
-    canvasViewport.height > 0 && contentHeight > 0 && contentHeight <= canvasViewport.height
-      ? (canvasViewport.height - contentHeight) / 2
-      : 0;
-  const scrollOriginX = canvasScroll.x;
-  const scrollOriginY = canvasScroll.y;
-  const basePanBoundsX = getPanBounds(contentWidth, canvasViewport.width, renderOffsetX);
-  const basePanBoundsY = getPanBounds(contentHeight, canvasViewport.height, renderOffsetY);
-  const { min: minPanX, max: maxPanX } = zoomPanException
-    ? includePanOffset(basePanBoundsX, canvasScroll.x)
-    : basePanBoundsX;
-  const { min: minPanY, max: maxPanY } = zoomPanException
-    ? includePanOffset(basePanBoundsY, canvasScroll.y)
-    : basePanBoundsY;
-
-  const setCanvasScrollLimited = useCallback(
-    (next: SetStateAction<{ x: number; y: number }>) => {
-      setCanvasScroll((previous) => {
-        const resolved = typeof next === "function" ? next(previous) : next;
-        const x = Math.min(maxPanX, Math.max(minPanX, resolved.x));
-        const y = Math.min(maxPanY, Math.max(minPanY, resolved.y));
-        return previous.x === x && previous.y === y ? previous : { x, y };
-      });
-    },
-    [maxPanX, maxPanY, minPanX, minPanY],
-  );
-
-  const handleViewportResize = useCallback((size: { width: number; height: number }) => {
-    setZoomPanException(false);
-    setCanvasViewport((prev) =>
-      prev.width === size.width && prev.height === size.height ? prev : size,
-    );
-  }, []);
-
-  useEffect(() => {
-    setZoomPanException(false);
-  }, [baseCellSize, gridHeight, gridWidth]);
-
-  // Re-clamp the stored offset whenever the pan bounds change (zoom, resize, grid size).
-  useEffect(() => {
-    setCanvasScrollLimited((previous) => previous);
-  }, [setCanvasScrollLimited]);
+    gridWrapperRef,
+    gridRef,
+  });
 
   useEffect(() => {
     const currentLayer = layers.find((layer) => layer.id === activeLayerId);
@@ -879,33 +810,6 @@ export function PixelPencil() {
     }
     setCanvasPixelSize((prev) => (prev === closest ? prev : closest));
   }, [gridHeight, gridWidth, setCanvasPixelSize]);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !gridWrapperRef.current) {
-      return;
-    }
-    const updateSize = () => {
-      const wrapper = gridWrapperRef.current;
-      if (!wrapper) return;
-      const measuredWidth = wrapper.clientWidth;
-      const parentWidth =
-        wrapper.parentElement?.clientWidth ?? measuredWidth;
-      const measuredHeight = wrapper.clientHeight;
-      const parentHeight =
-        wrapper.parentElement?.clientHeight ?? measuredHeight;
-
-      setAvailableWidth(parentWidth);
-      setAvailableHeight(parentHeight);
-    };
-    updateSize();
-    const observer = new ResizeObserver(updateSize);
-    observer.observe(gridWrapperRef.current);
-    window.addEventListener("resize", updateSize);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", updateSize);
-    };
-  }, []);
 
   useEffect(() => {
     if (tool === "rect-select" || selectionPointerIdRef.current === null) {
@@ -1447,51 +1351,6 @@ export function PixelPencil() {
     return () => window.removeEventListener("pointerup", handlePointerUp);
   }, [dragStartIndex, stopStroke, tool]);
 
-  const resolvePositionFromClientPoint = useCallback(
-    (clientX: number, clientY: number, options?: { clamp?: boolean }) => {
-      if (!gridRef.current || displayCellSize <= 0) return null;
-      const rect = gridRef.current.getBoundingClientRect();
-      const relativeX = clientX - rect.left;
-      const relativeY = clientY - rect.top;
-      if (!Number.isFinite(relativeX) || !Number.isFinite(relativeY)) {
-        return null;
-      }
-      const contentMinX = renderOffsetX - scrollOriginX;
-      const contentMinY = renderOffsetY - scrollOriginY;
-      const contentMaxX = contentMinX + contentWidth;
-      const contentMaxY = contentMinY + contentHeight;
-      let adjustedX = relativeX;
-      let adjustedY = relativeY;
-      const isOutside =
-        relativeX < contentMinX ||
-        relativeY < contentMinY ||
-        relativeX > contentMaxX ||
-        relativeY > contentMaxY;
-      if (isOutside) {
-        if (!options?.clamp) {
-          return null;
-        }
-        adjustedX = Math.min(Math.max(relativeX, contentMinX), contentMaxX);
-        adjustedY = Math.min(Math.max(relativeY, contentMinY), contentMaxY);
-      }
-      const worldX = scrollOriginX + (adjustedX - renderOffsetX);
-      const worldY = scrollOriginY + (adjustedY - renderOffsetY);
-      return {
-        x: worldX / displayCellSize,
-        y: worldY / displayCellSize,
-      };
-    },
-    [
-      contentHeight,
-      contentWidth,
-      displayCellSize,
-      renderOffsetX,
-      renderOffsetY,
-      scrollOriginX,
-      scrollOriginY,
-    ],
-  );
-
   type ResolvedPointer = {
     index: number;
     cellX: number;
@@ -1529,57 +1388,6 @@ export function PixelPencil() {
     (event: ReactPointerEvent<Element>, options?: { clamp?: boolean }) =>
       resolvePointerFromClientPoint(event.clientX, event.clientY, options),
     [resolvePointerFromClientPoint],
-  );
-
-  const zoomAtClientPoint = useCallback(
-    (direction: "in" | "out", steps: number, clientX: number, clientY: number) => {
-      const nextScale = Math.min(
-        MAX_ZOOM_SCALE,
-        Math.max(1, zoomScale + (direction === "in" ? steps : -steps)),
-      );
-      if (nextScale === zoomScale || !gridRef.current || displayCellSize <= 0) return;
-      const position = resolvePositionFromClientPoint(clientX, clientY, { clamp: true });
-      if (!position) return;
-      const rect = gridRef.current.getBoundingClientRect();
-      const pointerX = clientX - rect.left;
-      const pointerY = clientY - rect.top;
-      const nextCellSize = baseCellSize * nextScale;
-      const nextWidth = gridWidth * nextCellSize;
-      const nextHeight = gridHeight * nextCellSize;
-      const nextOffsetX =
-        nextWidth > 0 && nextWidth <= canvasViewport.width
-          ? (canvasViewport.width - nextWidth) / 2
-          : 0;
-      const nextOffsetY =
-        nextHeight > 0 && nextHeight <= canvasViewport.height
-          ? (canvasViewport.height - nextHeight) / 2
-          : 0;
-
-      setZoomScale(nextScale);
-      setZoomPanException(true);
-      setCanvasScroll({
-        x: position.x * nextCellSize + nextOffsetX - pointerX,
-        y: position.y * nextCellSize + nextOffsetY - pointerY,
-      });
-    },
-    [
-      baseCellSize,
-      canvasViewport.height,
-      canvasViewport.width,
-      displayCellSize,
-      gridHeight,
-      gridWidth,
-      resolvePositionFromClientPoint,
-      setZoomScale,
-      zoomScale,
-    ],
-  );
-
-  const handleWheelZoom = useCallback(
-    (direction: "in" | "out", steps: number, point: { x: number; y: number }) => {
-      zoomAtClientPoint(direction, steps, point.x, point.y);
-    },
-    [zoomAtClientPoint],
   );
 
   const resolveIndexFromPointerEvent = useCallback(
