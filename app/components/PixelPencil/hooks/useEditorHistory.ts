@@ -62,7 +62,9 @@ export type EditorHistoryOptions = {
   captureMeta: () => EditorMeta;
   /**
    * Restores metadata into component state. `buffers` holds replacement pixel buffers by layer id
-   * (empty for pixel entries); every other layer listed in `meta` keeps its current buffer. The
+   * (empty for pixel entries); every other layer listed in `meta` keeps its current buffer. A layer
+   * listed in `meta` with neither a live buffer nor an entry in `buffers` (redo of an added layer)
+   * gets a blank buffer of the current grid size; later pixel entries restore its contents. The
    * buffers are fresh copies the editor may install and mutate.
    */
   applyMeta: (meta: EditorMeta, buffers: Map<string, PixelBuffer>) => void;
@@ -169,15 +171,35 @@ const sumBufferBytes = (buffers: Map<string, PixelBuffer>) => {
   return bytes;
 };
 
-/** Pixel bytes an entry holds: tile before + after, or the replaced buffers on both sides. */
+/**
+ * Selection bytes an entry's metadata holds. An unchanged selection is shared between `before`
+ * and `after` (see `shareUnchangedSelection`), so it is counted once.
+ */
+const selectionBytes = (before: EditorMeta, after: EditorMeta) => {
+  const beforeBytes = before.selection?.data.byteLength ?? 0;
+  if (after.selection === before.selection) return beforeBytes;
+  return beforeBytes + (after.selection?.data.byteLength ?? 0);
+};
+
+/**
+ * Bytes an entry holds: tile before + after, or the replaced buffers on both sides, plus the
+ * selection data in its metadata.
+ */
 export const entryBytes = (entry: HistoryEntry) => {
+  let bytes = selectionBytes(entry.before, entry.after);
   if (entry.kind === "structure") {
-    return sumBufferBytes(entry.buffersBefore) + sumBufferBytes(entry.buffersAfter);
+    return bytes + sumBufferBytes(entry.buffersBefore) + sumBufferBytes(entry.buffersAfter);
   }
-  let bytes = 0;
   for (const tile of entry.tiles.values()) bytes += tile.before.byteLength + tile.after.byteLength;
   return bytes;
 };
+
+/**
+ * Returns `after` with its selection replaced by `before`'s when the two are equal, so an entry
+ * stores one copy. Entries are never mutated, so sharing the object is safe.
+ */
+const shareUnchangedSelection = (before: EditorMeta, after: EditorMeta): EditorMeta =>
+  areSelectionsEqual(before.selection, after.selection) ? { ...after, selection: before.selection } : after;
 
 const sumEntryBytes = (stack: HistoryEntry[]) => stack.reduce((total, entry) => total + entryBytes(entry), 0);
 
@@ -307,7 +329,7 @@ export function useEditorHistory({
     const pending = pendingRef.current;
     if (!pending) return;
     endAction();
-    const after = copyMeta(captureMeta());
+    const after = shareUnchangedSelection(pending.before, copyMeta(captureMeta()));
     const tiles = new Map<number, TilePatch>();
     const buffer = pending.layerId === null ? null : getLayerBuffer(pending.layerId);
     if (buffer) {
@@ -336,7 +358,8 @@ export function useEditorHistory({
         const current = getLayerBuffer(layerId);
         if (current) buffersAfter.set(layerId, cloneBuffer(current));
       }
-      pushNewEntry({ kind: "structure", before, after: copyMeta(captureMeta()), buffersBefore, buffersAfter });
+      const after = shareUnchangedSelection(before, copyMeta(captureMeta()));
+      pushNewEntry({ kind: "structure", before, after, buffersBefore, buffersAfter });
     },
     [captureMeta, endAction, getLayerBuffer, pushNewEntry],
   );

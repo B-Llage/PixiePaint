@@ -60,12 +60,14 @@ function setup({ maxHistory, byteBudget }: SetupOptions = {}) {
       selection: cloneSelection(state.selection),
     }),
   );
-  // Rebuilds the layer list from metadata, keeping live buffers unless replaced.
+  // Rebuilds the layer list from metadata, keeping live buffers unless replaced; a layer with
+  // neither (redo of an added layer) gets a blank grid-sized buffer, per the applyMeta contract.
   const applyMeta = vi.fn((meta: EditorMeta, buffers: Map<string, PixelBuffer>) => {
     state.layers = meta.layers.map((layerMeta) => {
       const pixels =
-        buffers.get(layerMeta.id) ?? state.layers.find((layer) => layer.id === layerMeta.id)?.pixels;
-      if (!pixels) throw new Error(`no buffer for layer ${layerMeta.id}`);
+        buffers.get(layerMeta.id) ??
+        state.layers.find((layer) => layer.id === layerMeta.id)?.pixels ??
+        createBuffer(SIZE, SIZE);
       return { ...layerMeta, pixels };
     });
     state.activeLayerId = meta.activeLayerId;
@@ -375,6 +377,60 @@ describe("useEditorHistory", () => {
     act(() => hook.result.current.redo());
     act(() => hook.result.current.redo());
     expect(cell(70, 70)).toBe(RED);
+    expect(hook.result.current.canRedo).toBe(false);
+  });
+
+  it("counts a floating selection's bytes toward the byte budget", () => {
+    // Two one-tile entries fit; a 64x64 floating selection adds 16 KB to each and pushes them over.
+    const budget = 2 * TILE_ENTRY_BYTES + 1000;
+    const plain = setup({ byteBudget: budget });
+    plain.stroke(0, 0, RED);
+    plain.stroke(70, 0, GREEN);
+    expect(plain.hook.result.current.saveStacks().undo).toHaveLength(2);
+
+    const floating = setup({ byteBudget: budget });
+    floating.state.selection = {
+      rect: { x: 0, y: 0, width: 64, height: 64 },
+      offset: { dx: 0, dy: 0 },
+      data: new Uint32Array(64 * 64).fill(BLUE),
+      isFloating: true,
+    };
+    floating.stroke(0, 0, RED);
+    floating.stroke(70, 0, GREEN);
+    const { undo } = floating.hook.result.current.saveStacks();
+    expect(undo).toHaveLength(1);
+    // The unchanged selection is stored once, shared by before and after.
+    expect(undo[0].after.selection).toBe(undo[0].before.selection);
+    expect(floating.cell(70, 0)).toBe(GREEN);
+  });
+
+  it("redoes an added layer with a blank buffer and replays its pixel entries", () => {
+    const { hook, state, cell, stroke, pixelEntry } = setup();
+
+    act(() =>
+      hook.result.current.recordStructureChange(() => {
+        state.layers.push(makeLayer("b"));
+        state.activeLayerId = "b";
+      }),
+    );
+    const structure = hook.result.current.saveStacks().undo[0];
+    if (structure.kind !== "structure") throw new Error("expected a structure entry");
+    expect(structure.buffersAfter.size).toBe(0);
+
+    stroke(5, 5, RED);
+    expect(pixelEntry(1).layerId).toBe("b");
+
+    act(() => hook.result.current.undo());
+    expect(cell(5, 5, "b")).toBe(0);
+    act(() => hook.result.current.undo());
+    expect(state.layers.map((layer) => layer.id)).toEqual(["a"]);
+    expect(state.activeLayerId).toBe("a");
+
+    act(() => hook.result.current.redo());
+    expect(state.layers.map((layer) => layer.id)).toEqual(["a", "b"]);
+    expect(cell(5, 5, "b")).toBe(0);
+    act(() => hook.result.current.redo());
+    expect(cell(5, 5, "b")).toBe(RED);
     expect(hook.result.current.canRedo).toBe(false);
   });
 
