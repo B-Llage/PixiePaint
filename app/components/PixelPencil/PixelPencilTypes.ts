@@ -1,3 +1,4 @@
+import type { PixelBuffer } from "./pixel-buffer";
 import { BRUSH_SHAPES, SHAPE_TYPES, ZOOM_MODE_OPTIONS } from "./PixelPencil.constants";
 
 export interface PaintTool {
@@ -33,7 +34,7 @@ export type ZoomMode = (typeof ZOOM_MODE_OPTIONS)[number]["id"];
 export interface Layer {
   id: string;
   name: string;
-  pixels: PixelValue[];
+  pixels: PixelBuffer;
   visible: boolean;
 }
 
@@ -44,16 +45,12 @@ export interface SelectionRect {
   height: number;
 }
 
-export interface SelectionPixel {
-  relX: number;
-  relY: number;
-  color: PixelValue;
-}
 
 /** A rectangular selection. While `isFloating`, its pixels are lifted off the layer and drawn at `offset`. */
 export interface SelectionState {
   rect: SelectionRect;
   offset: { dx: number; dy: number };
-  pixels: SelectionPixel[];
+  /** `rect.width * rect.height` packed values, row-major. */
+  data: Uint32Array;
   isFloating: boolean;
 }

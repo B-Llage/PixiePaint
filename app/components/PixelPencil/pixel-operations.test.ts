@@ -1,100 +1,28 @@
 import { describe, expect, it } from "vitest";
 
+import { createBuffer, EMPTY_PIXEL, TRANSPARENT_PIXEL } from "./pixel-buffer";
 import {
-  areLayersEqual,
-  arePixelsEqual,
-  resizePixels,
   areSelectionsEqual,
-  cloneLayer,
-  cloneLayers,
   cloneSelection,
-  composeLayers,
   generateLayerName,
-  translatePixels,
+  hasSelectionPixels,
 } from "./pixel-operations";
 import type { Layer, SelectionState } from "./PixelPencilTypes";
 
 const makeLayer = (overrides: Partial<Layer> = {}): Layer => ({
   id: "layer-1",
   name: "Layer 1",
-  pixels: ["#a", null, "transparent", "#b"],
+  pixels: createBuffer(2, 2),
   visible: true,
   ...overrides,
 });
 
 const makeSelection = (overrides: Partial<SelectionState> = {}): SelectionState => ({
-  rect: { x: 1, y: 2, width: 3, height: 4 },
+  rect: { x: 1, y: 2, width: 2, height: 2 },
   offset: { dx: 0, dy: 0 },
-  pixels: [
-    { relX: 0, relY: 0, color: "#a" },
-    { relX: 1, relY: 0, color: null },
-  ],
+  data: new Uint32Array([0xff0000ff, EMPTY_PIXEL, TRANSPARENT_PIXEL, 0x00ff00ff]),
   isFloating: false,
   ...overrides,
-});
-
-describe("composeLayers", () => {
-  it("uses the topmost visible opaque pixel", () => {
-    const bottom = { visible: true, pixels: ["#111111", "#222222", null] };
-    const top = { visible: true, pixels: ["transparent", "#eeeeee", "#ffffff"] };
-
-    expect(composeLayers([bottom, top], 3)).toEqual(["#111111", "#eeeeee", "#ffffff"]);
-    expect(composeLayers([bottom, { ...top, visible: false }], 3)).toEqual([
-      "#111111",
-      "#222222",
-      null,
-    ]);
-  });
-});
-
-describe("translatePixels", () => {
-  it("moves pixels by whole cells and clips anything beyond the edge", () => {
-    const source = ["#a", null, "#b", null, null, "#c"];
-
-    expect(translatePixels(source, 3, 2, 1, 0)).toEqual([null, "#a", null, null, null, null]);
-    expect(translatePixels(source, 3, 2, 0, -1)).toEqual([null, null, "#c", null, null, null]);
-    expect(source).toEqual(["#a", null, "#b", null, null, "#c"]);
-  });
-});
-
-describe("arePixelsEqual", () => {
-  it("compares cell by cell and by length", () => {
-    expect(arePixelsEqual(["#a", null], ["#a", null])).toBe(true);
-    expect(arePixelsEqual(["#a", null], ["#a", "transparent"])).toBe(false);
-    expect(arePixelsEqual(["#a"], ["#a", null])).toBe(false);
-    expect(arePixelsEqual([], [])).toBe(true);
-  });
-});
-
-describe("cloneLayer and cloneLayers", () => {
-  it("produces an independent copy with the same contents", () => {
-    const layer = makeLayer();
-    const copy = cloneLayer(layer, 4);
-
-    expect(copy).toEqual(layer);
-    expect(copy).not.toBe(layer);
-    expect(copy.pixels).not.toBe(layer.pixels);
-    copy.pixels[0] = "#zzz";
-    expect(layer.pixels[0]).toBe("#a");
-  });
-
-  it("pads with null when the target size is larger and truncates when smaller", () => {
-    const layer = makeLayer();
-    expect(cloneLayer(layer, 6).pixels).toEqual(["#a", null, "transparent", "#b", null, null]);
-    expect(cloneLayer(layer, 2).pixels).toEqual(["#a", null]);
-  });
-
-  it("normalizes sparse holes to null", () => {
-    const sparse = makeLayer({ pixels: new Array(3) as Layer["pixels"] });
-    expect(cloneLayer(sparse, 3).pixels).toEqual([null, null, null]);
-  });
-
-  it("clones every layer in order", () => {
-    const layers = [makeLayer(), makeLayer({ id: "layer-2", name: "Layer 2", visible: false })];
-    const copies = cloneLayers(layers, 4);
-    expect(copies).toEqual(layers);
-    expect(copies[1]).not.toBe(layers[1]);
-  });
 });
 
 describe("cloneSelection", () => {
@@ -102,50 +30,61 @@ describe("cloneSelection", () => {
     expect(cloneSelection(null)).toBeNull();
   });
 
-  it("deep copies the rect, offset, and pixels", () => {
-    const selection = makeSelection({ isFloating: true, offset: { dx: 2, dy: -1 } });
-    const copy = cloneSelection(selection);
+  it("deep-copies rect, offset and data", () => {
+    const source = makeSelection();
+    const clone = cloneSelection(source)!;
 
-    expect(copy).toEqual(selection);
-    expect(copy).not.toBe(selection);
-    expect(copy?.rect).not.toBe(selection.rect);
-    expect(copy?.offset).not.toBe(selection.offset);
-    expect(copy?.pixels[0]).not.toBe(selection.pixels[0]);
+    expect(clone).toEqual(source);
+    clone.data[0] = 0x12345678;
+    clone.rect.x = 9;
+    clone.offset.dx = 5;
+
+    expect(source.data[0]).toBe(0xff0000ff);
+    expect(source.rect.x).toBe(1);
+    expect(source.offset.dx).toBe(0);
   });
 });
 
 describe("areSelectionsEqual", () => {
-  it("treats two nulls as equal and null versus a selection as different", () => {
+  it("treats identical references and two nulls as equal", () => {
+    const selection = makeSelection();
+    expect(areSelectionsEqual(selection, selection)).toBe(true);
     expect(areSelectionsEqual(null, null)).toBe(true);
-    expect(areSelectionsEqual(null, makeSelection())).toBe(false);
-    expect(areSelectionsEqual(makeSelection(), null)).toBe(false);
+    expect(areSelectionsEqual(selection, null)).toBe(false);
   });
 
-  it("compares structure rather than identity", () => {
+  it("is equal for deep copies", () => {
     expect(areSelectionsEqual(makeSelection(), makeSelection())).toBe(true);
-    expect(areSelectionsEqual(makeSelection(), makeSelection({ isFloating: true }))).toBe(false);
+  });
+
+  it("detects a one-cell difference in data", () => {
+    const other = makeSelection();
+    other.data[3] = 0x00ff01ff;
+    expect(areSelectionsEqual(makeSelection(), other)).toBe(false);
+  });
+
+  it("detects rect, offset, and floating differences", () => {
+    expect(areSelectionsEqual(makeSelection(), makeSelection({ rect: { x: 0, y: 2, width: 2, height: 2 } }))).toBe(false);
     expect(areSelectionsEqual(makeSelection(), makeSelection({ offset: { dx: 1, dy: 0 } }))).toBe(false);
-    expect(
-      areSelectionsEqual(makeSelection(), makeSelection({ rect: { x: 1, y: 2, width: 3, height: 5 } })),
-    ).toBe(false);
-    expect(
-      areSelectionsEqual(
-        makeSelection(),
-        makeSelection({ pixels: [{ relX: 0, relY: 0, color: "#a" }, { relX: 1, relY: 0, color: "#b" }] }),
-      ),
-    ).toBe(false);
-    expect(areSelectionsEqual(makeSelection(), makeSelection({ pixels: [] }))).toBe(false);
+    expect(areSelectionsEqual(makeSelection(), makeSelection({ isFloating: true }))).toBe(false);
+  });
+
+  it("detects differing data lengths", () => {
+    expect(areSelectionsEqual(makeSelection(), makeSelection({ data: new Uint32Array(2) }))).toBe(false);
   });
 });
 
-describe("areLayersEqual", () => {
-  it("requires matching ids, names, visibility, and pixels", () => {
-    expect(areLayersEqual([makeLayer()], [makeLayer()])).toBe(true);
-    expect(areLayersEqual([makeLayer()], [makeLayer({ id: "other" })])).toBe(false);
-    expect(areLayersEqual([makeLayer()], [makeLayer({ name: "Renamed" })])).toBe(false);
-    expect(areLayersEqual([makeLayer()], [makeLayer({ visible: false })])).toBe(false);
-    expect(areLayersEqual([makeLayer()], [makeLayer({ pixels: ["#a", null, null, "#b"] })])).toBe(false);
-    expect(areLayersEqual([makeLayer()], [])).toBe(false);
+describe("hasSelectionPixels", () => {
+  it("is false for null and all-empty data", () => {
+    expect(hasSelectionPixels(null)).toBe(false);
+    expect(hasSelectionPixels(makeSelection({ data: new Uint32Array(4) }))).toBe(false);
+  });
+
+  it("is true when one cell is transparent or painted", () => {
+    const transparent = new Uint32Array(4);
+    transparent[2] = TRANSPARENT_PIXEL;
+    expect(hasSelectionPixels(makeSelection({ data: transparent }))).toBe(true);
+    expect(hasSelectionPixels(makeSelection())).toBe(true);
   });
 });
 
@@ -159,23 +98,5 @@ describe("generateLayerName", () => {
     const layers = [makeLayer({ name: "Layer 2" }), makeLayer({ id: "b", name: "Layer 3" })];
     expect(generateLayerName(layers)).toBe("Layer 4");
     expect(generateLayerName([makeLayer({ name: "Background" })])).toBe("Layer 2");
-  });
-});
-
-describe("resizePixels", () => {
-  it("keeps the top-left overlap and fills new cells with null when growing", () => {
-    // 2x2: a b / c d
-    const resized = resizePixels(["a", "b", "c", "d"], { width: 2, height: 2 }, { width: 3, height: 3 });
-    expect(resized).toEqual(["a", "b", null, "c", "d", null, null, null, null]);
-  });
-
-  it("crops to the top-left when shrinking on one axis and growing on the other", () => {
-    // 3x2: a b c / d e f
-    const resized = resizePixels(["a", "b", "c", "d", "e", "f"], { width: 3, height: 2 }, { width: 2, height: 3 });
-    expect(resized).toEqual(["a", "b", "d", "e", null, null]);
-  });
-
-  it("treats a short source array as empty cells", () => {
-    expect(resizePixels(["a"], { width: 2, height: 2 }, { width: 2, height: 2 })).toEqual(["a", null, null, null]);
   });
 });
