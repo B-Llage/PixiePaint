@@ -37,7 +37,11 @@ describe("useComposite", () => {
     const bigger = createBuffer(8, 8);
     bigger.data.fill(RED);
     layersRef.current = [{ id: "a", name: "a", visible: true, pixels: bigger }];
+    const previous = hook.result.current.composite;
+    const versionBefore = hook.result.current.compositeVersion;
     hook.rerender({ width: 8, height: 8 });
+    expect(hook.result.current.composite).not.toBe(previous);
+    expect(hook.result.current.compositeVersion).toBe(versionBefore);
     expect(hook.result.current.composite.width).toBe(8);
     expect(hook.result.current.composite.height).toBe(8);
     const composite = hook.result.current.compositeRef.current;

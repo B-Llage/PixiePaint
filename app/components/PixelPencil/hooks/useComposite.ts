@@ -10,6 +10,8 @@ type Params = { layersRef: RefObject<Layer[]>; width: number; height: number };
 /**
  * Owns the flattened composite of all visible layers. `recompose(rect)` is
  * bounded by the rect; the renderer reads `dirtyRef` and clears it after upload.
+ * A size change yields a new `composite` identity (consumers key on it);
+ * `compositeVersion` only bumps from `recompose`.
  */
 export function useComposite({ layersRef, width, height }: Params) {
   const composite = useMemo(() => createBuffer(width, height), [width, height]);
@@ -17,8 +19,7 @@ export function useComposite({ layersRef, width, height }: Params) {
   const dirtyRef = useRef<DirtyRect | null>(null);
   const [compositeVersion, setCompositeVersion] = useState(0);
 
-  // A new buffer (first mount or size change) is fully composed, marked fully
-  // dirty, and announced via the version bump.
+  // A new buffer (first mount or size change) is fully composed and marked fully dirty.
   useEffect(() => {
     compositeRef.current = composite;
     // Layers may briefly have another size while a resize propagates; skip them.
@@ -27,9 +28,6 @@ export function useComposite({ layersRef, width, height }: Params) {
     );
     composeInto(composite, matching, null);
     dirtyRef.current = { x: 0, y: 0, width: composite.width, height: composite.height };
-    // The version must change once the new buffer has been composed so consumers re-render.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setCompositeVersion((v) => v + 1);
   }, [composite, layersRef]);
 
   const recompose = useCallback(
