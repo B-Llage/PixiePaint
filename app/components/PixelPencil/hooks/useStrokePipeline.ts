@@ -130,6 +130,10 @@ export function useStrokePipeline({
   const scratchMaskRef = useRef<Uint8Array | null>(null);
   /** Separate scratch mask for the path preview, which stays visible between commits. */
   const previewMaskRef = useRef<ScratchMask | null>(null);
+  /** The freehand stroke's mask: grown by new cells while drawing, committed as one edit, then cleared. */
+  const strokeMaskRef = useRef<ScratchMask | null>(null);
+  /** The stroke mask as handed to `setPathPreview`; its bounds grow in place with the mask. */
+  const strokePreviewRef = useRef<PreviewMask | null>(null);
 
   useEffect(() => {
     const pointerQueue = pointerQueueRef.current;
@@ -213,7 +217,32 @@ export function useStrokePipeline({
     [gridHeight, gridWidth],
   );
 
-  const buildPreviewFromAppliedCells = buildFootprintPreview;
+  /** Clears the stroke mask over its bounds, or lays out a fresh one when the grid size changed. */
+  const resetStrokeMask = useCallback(() => {
+    strokeMaskRef.current = clearScratchMask(strokeMaskRef.current, {
+      width: gridWidth,
+      height: gridHeight,
+    });
+    strokePreviewRef.current = null;
+  }, [gridHeight, gridWidth]);
+
+  /** Stamps brush footprints into the stroke mask and, with previews on, publishes the grown mask. */
+  const stampStrokeCells = useCallback(
+    (cells: number[]) => {
+      const scratch = strokeMaskRef.current;
+      if (!scratch) return;
+      const grid = { width: gridWidth, height: gridHeight };
+      for (const cell of cells) {
+        stampScratch(scratch, grid, computeBrushIndices(cell));
+      }
+      if (!previewToolEffects || !scratch.bounds) return;
+      const preview = strokePreviewRef.current ?? { mask: scratch.mask, bounds: scratch.bounds };
+      preview.bounds = scratch.bounds;
+      strokePreviewRef.current = preview;
+      setPathPreview(preview);
+    },
+    [computeBrushIndices, gridHeight, gridWidth, previewToolEffects, setPathPreview],
+  );
 
   const capturePointer = useCallback((canvas: HTMLCanvasElement, pointerId: number) => {
     try {
@@ -257,30 +286,18 @@ export function useStrokePipeline({
     (pointer: StrokePointer, value: PixelValue, freehand: boolean) => {
       if (freehand) {
         strokeWorldPointsRef.current = [pointer.position];
-        const applied = new Set<number>();
-        applied.add(pointer.index);
-        strokeAppliedCellsRef.current = applied;
-        if (previewToolEffects) {
-          setPathPreview(buildPreviewFromAppliedCells(applied));
-        } else {
-          setPathPreview(null);
-        }
+        strokeAppliedCellsRef.current = new Set([pointer.index]);
+        resetStrokeMask();
+        setPathPreview(null);
+        stampStrokeCells([pointer.index]);
       } else {
         strokeWorldPointsRef.current = null;
         strokeAppliedCellsRef.current = null;
       }
 
       startStroke(pointer, value);
-      if (strokeAppliedCellsRef.current && freehand) {
-        strokeAppliedCellsRef.current.add(pointer.index);
-        if (previewToolEffects) {
-          setPathPreview(
-            buildPreviewFromAppliedCells(strokeAppliedCellsRef.current),
-          );
-        }
-      }
     },
-    [buildPreviewFromAppliedCells, previewToolEffects, setPathPreview, startStroke],
+    [resetStrokeMask, setPathPreview, stampStrokeCells, startStroke],
   );
 
   const appendStrokePoint = useCallback(
@@ -297,30 +314,33 @@ export function useStrokePipeline({
       }
       worldPoints.push(worldPoint);
       if (lastPoint) {
-        const segmentCells = traceWorldSegment(lastPoint, worldPoint);
-        if (segmentCells.length) {
-          const newCells: number[] = [];
-          for (const cell of segmentCells) {
-            if (applied.has(cell)) continue;
-            applied.add(cell);
-            newCells.push(cell);
-          }
-          if (previewToolEffects) {
-            setPathPreview(buildPreviewFromAppliedCells(applied));
-          }
+        const newCells: number[] = [];
+        for (const cell of traceWorldSegment(lastPoint, worldPoint)) {
+          if (applied.has(cell)) continue;
+          applied.add(cell);
+          newCells.push(cell);
         }
+        if (newCells.length) stampStrokeCells(newCells);
       }
     },
-    [buildPreviewFromAppliedCells, previewToolEffects, setPathPreview, traceWorldSegment],
+    [stampStrokeCells, traceWorldSegment],
   );
 
   const commitStrokeBuffer = useCallback(
     (value: PixelValue) => {
-      const applied = strokeAppliedCellsRef.current;
-      if (!applied || applied.size === 0) return;
-      fillFootprints(applied, value);
+      const scratch = strokeMaskRef.current;
+      const bounds = scratch?.bounds;
+      if (!scratch || !bounds) return;
+      const grid = { width: gridWidth, height: gridHeight };
+      const packed = toPackedValue(value);
+      try {
+        editLayer(activeLayerId, bounds, (buffer) => fillMask(buffer, scratch.mask, bounds, packed));
+      } finally {
+        clearMaskRect(scratch.mask, grid, bounds);
+        scratch.bounds = null;
+      }
     },
-    [fillFootprints],
+    [activeLayerId, editLayer, gridHeight, gridWidth],
   );
 
   const clearPointerQueue = useCallback(() => {
@@ -336,12 +356,19 @@ export function useStrokePipeline({
     lastPaintedIndexRef.current = null;
     strokeWorldPointsRef.current = null;
     strokeAppliedCellsRef.current = null;
+    if (strokeMaskRef.current) {
+      strokeMaskRef.current = clearScratchMask(strokeMaskRef.current, {
+        width: gridWidth,
+        height: gridHeight,
+      });
+    }
+    strokePreviewRef.current = null;
     activePointerIdRef.current = null;
     setDragStartIndex(null);
     setPathPreview(null);
     clearPointerQueue();
     finalizeAction();
-  }, [clearPointerQueue, finalizeAction, setDragStartIndex, setPathPreview]);
+  }, [clearPointerQueue, finalizeAction, gridHeight, gridWidth, setDragStartIndex, setPathPreview]);
 
   const flushPointerQueue = useCallback(function flushPointerQueueInternal() {
     pointerRAFRef.current = null;

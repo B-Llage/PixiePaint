@@ -182,6 +182,66 @@ describe("useStrokePipeline", () => {
     expect(painted()).toEqual([0, 1, 2]);
   });
 
+  it("grows the preview mask in place by only the new cells per step", () => {
+    const { hook } = setup();
+    const api = () => hook.result.current.api;
+    const count = () => previewCells(hook.result.current.pathPreview)?.size;
+    act(() => api().beginStroke({ index: 0, position: { x: 0.5, y: 0.5 } }, "#f00", true));
+    const first = hook.result.current.pathPreview;
+    expect(count()).toBe(1);
+    act(() => api().appendStrokePoint({ x: 1.5, y: 0.5 }));
+    expect(count()).toBe(2);
+    act(() => api().appendStrokePoint({ x: 2.5, y: 0.5 }));
+    expect(count()).toBe(3);
+    expect(hook.result.current.pathPreview?.mask).toBe(first?.mask);
+    // Re-tracing already traced cells changes nothing.
+    act(() => api().appendStrokePoint({ x: 1.5, y: 0.5 }));
+    expect(count()).toBe(3);
+    expect(hook.result.current.pathPreview?.bounds).toEqual({ x: 0, y: 0, width: 3, height: 1 });
+  });
+
+  it("commits the stroke as one edit over the stroke bounds and clears the mask", () => {
+    const { hook, edits, painted } = setup();
+    const api = () => hook.result.current.api;
+    act(() => api().beginStroke({ index: 0, position: { x: 0.5, y: 0.5 } }, "#f00", true));
+    const editsAfterPress = edits.length;
+    act(() => api().appendStrokePoint({ x: 3.5, y: 0.5 }));
+    act(() => api().appendStrokePoint({ x: 3.5, y: 2.5 }));
+    const preview = hook.result.current.pathPreview as PreviewMask;
+    const bounds = { ...preview.bounds };
+    act(() => api().commitStrokeBuffer("#f00"));
+    expect(edits).toHaveLength(editsAfterPress + 1);
+    expect(edits[edits.length - 1].rect).toEqual(bounds);
+    expect(bounds).toEqual({ x: 0, y: 0, width: 4, height: 3 });
+    expect(painted()).toEqual([0, 1, 2, 3, 11, 19]);
+    expect(preview.mask.every((v) => v === 0)).toBe(true);
+  });
+
+  it("keeps a wide brush stroke's edit rect within the brush-padded path bounds", () => {
+    const { hook, edits } = setup({ brushSize: 3 });
+    const api = () => hook.result.current.api;
+    act(() => api().beginStroke({ index: 3 * GRID + 3, position: { x: 3.5, y: 3.5 } }, "#f00", true));
+    act(() => api().appendStrokePoint({ x: 5.5, y: 3.5 }));
+    act(() => api().commitStrokeBuffer("#f00"));
+    expect(edits[edits.length - 1].rect).toEqual({ x: 2, y: 2, width: 5, height: 3 });
+  });
+
+  it("clears an abandoned stroke's mask and keeps line previews off the stroke mask", () => {
+    const { hook } = setup();
+    const api = () => hook.result.current.api;
+    act(() => api().beginStroke({ index: 0, position: { x: 0.5, y: 0.5 } }, "#f00", true));
+    act(() => api().appendStrokePoint({ x: 2.5, y: 0.5 }));
+    const strokeMask = (hook.result.current.pathPreview as PreviewMask).mask;
+    const line = api().buildLinePreview([40, 41]);
+    expect(line.mask).not.toBe(strokeMask);
+    expect(strokeMask.reduce((n, v) => n + v, 0)).toBe(3);
+    act(() => api().stopStroke());
+    expect(strokeMask.every((v) => v === 0)).toBe(true);
+    // A new stroke starts clean.
+    act(() => api().beginStroke({ index: 63, position: { x: 7.5, y: 7.5 } }, "#f00", true));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([63]));
+  });
+
   it("does not preview a freehand stroke when previews are off", () => {
     const { hook } = setup({ previewToolEffects: false });
     act(() => hook.result.current.api.beginStroke({ index: 0, position: { x: 0.5, y: 0.5 } }, "#f00", true));

@@ -181,7 +181,9 @@ export function PixelPencil() {
   const pathPreviewRef = useRef<PreviewMask | null>(null);
   const setPathPreview = useCallback(
     (next: PreviewMask | null) => {
-      if (pathPreviewRef.current === next) return;
+      // A stroke grows its mask in place, so any non-null preview needs a redraw even
+      // when its identity is unchanged; only hiding an already hidden preview is a no-op.
+      if (next === null && pathPreviewRef.current === null) return;
       pathPreviewRef.current = next;
       requestRedraw();
     },
