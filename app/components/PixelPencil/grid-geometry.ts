@@ -1,3 +1,4 @@
+import type { DirtyRect, PixelBuffer } from "./pixel-buffer";
 import type { BrushShape, PixelValue, ShapeKind } from "./PixelPencilTypes";
 
 /** Pure grid algorithms over a row-major `width * height` cell grid. */
@@ -293,4 +294,133 @@ export function collectFillRegion(
   }
 
   return region;
+}
+
+/** A canvas-sized, index-aligned cell mask (`1` = set) with the bounding rect of its set cells. */
+export type PreviewMask = { mask: Uint8Array; bounds: DirtyRect };
+
+export const createMask = (grid: GridSize): Uint8Array => new Uint8Array(grid.width * grid.height);
+
+/** Sets the listed cells in `mask`; returns the union of `bounds` and the stamped cells' rect. */
+export function stampCells(
+  mask: Uint8Array,
+  grid: GridSize,
+  indices: ArrayLike<number>,
+  bounds: DirtyRect | null,
+): DirtyRect | null {
+  if (indices.length === 0) return bounds;
+  const { width } = grid;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < indices.length; i += 1) {
+    const index = indices[i];
+    mask[index] = 1;
+    const y = Math.floor(index / width);
+    const x = index - y * width;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const stamped = { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+  if (!bounds) return stamped;
+  const left = Math.min(bounds.x, stamped.x);
+  const top = Math.min(bounds.y, stamped.y);
+  const right = Math.max(bounds.x + bounds.width, stamped.x + stamped.width);
+  const bottom = Math.max(bounds.y + bounds.height, stamped.y + stamped.height);
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+/** Clears every mask cell inside `rect` (clipped to the grid). */
+export function clearMaskRect(mask: Uint8Array, grid: GridSize, rect: DirtyRect): void {
+  const minX = Math.max(0, rect.x);
+  const maxX = Math.min(grid.width, rect.x + rect.width);
+  const minY = Math.max(0, rect.y);
+  const maxY = Math.min(grid.height, rect.y + rect.height);
+  if (maxX <= minX) return;
+  for (let y = minY; y < maxY; y += 1) {
+    mask.fill(0, y * grid.width + minX, y * grid.width + maxX);
+  }
+}
+
+/** The grid-clipped square a brush of `brushSize` covers around `centerIndex`, whatever its shape. */
+export function brushBounds(grid: GridSize, centerIndex: number, brushSize: number): DirtyRect {
+  const { x: centerX, y: centerY } = indexToCoords(grid, centerIndex);
+  const startOffset = -Math.floor((brushSize - 1) / 2);
+  const endOffset = Math.ceil((brushSize - 1) / 2);
+  const minX = Math.max(0, centerX + startOffset);
+  const maxX = Math.min(grid.width - 1, centerX + endOffset);
+  const minY = Math.max(0, centerY + startOffset);
+  const maxY = Math.min(grid.height - 1, centerY + endOffset);
+  return { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
+/**
+ * Four-connected scanline fill over cells whose packed value equals the start cell's.
+ * Uses a flat span stack and the mask as the visited set, so it allocates no per-cell objects.
+ */
+export function collectFillMask(buffer: PixelBuffer, startIndex: number): PreviewMask | null {
+  const { width, height, data } = buffer;
+  if (!Number.isInteger(startIndex) || startIndex < 0 || startIndex >= width * height) return null;
+
+  const target = data[startIndex];
+  const mask = new Uint8Array(width * height);
+  // Each span is four ints: y, xLeft, xRight (inclusive), and the row delta it was reached from.
+  const stack: number[] = [];
+  let minX = width;
+  let maxX = -1;
+  let minY = height;
+  let maxY = -1;
+
+  const startY = Math.floor(startIndex / width);
+  const startX = startIndex - startY * width;
+  stack.push(startY, startX, startX, 1, startY, startX, startX, -1);
+
+  while (stack.length) {
+    const dy = stack.pop()!;
+    const xRight = stack.pop()!;
+    const xLeft = stack.pop()!;
+    const y = stack.pop()!;
+    const row = y * width;
+
+    // Extend the span left and right across matching, unvisited cells containing [xLeft, xRight].
+    let left = xLeft;
+    while (left > 0 && mask[row + left - 1] === 0 && data[row + left - 1] === target) left -= 1;
+    let right = xRight;
+    while (right < width - 1 && mask[row + right + 1] === 0 && data[row + right + 1] === target) right += 1;
+
+    // The seed range may include already-visited cells; only mark and scan unvisited matching ones.
+    let marked = false;
+    for (let x = left; x <= right; x += 1) {
+      if (mask[row + x] === 0 && data[row + x] === target) {
+        mask[row + x] = 1;
+        marked = true;
+      }
+    }
+    if (!marked) continue;
+
+    if (left < minX) minX = left;
+    if (right > maxX) maxX = right;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+
+    for (let pass = 0; pass < 2; pass += 1) {
+      const ny = pass === 0 ? y + dy : y - dy;
+      if (ny < 0 || ny >= height) continue;
+      const nextRow = ny * width;
+      let x = left;
+      while (x <= right) {
+        if (mask[nextRow + x] === 0 && data[nextRow + x] === target) {
+          const runStart = x;
+          while (x + 1 <= right && mask[nextRow + x + 1] === 0 && data[nextRow + x + 1] === target) x += 1;
+          stack.push(ny, runStart, x, ny - y);
+        }
+        x += 1;
+      }
+    }
+  }
+
+  return { mask, bounds: { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 } };
 }

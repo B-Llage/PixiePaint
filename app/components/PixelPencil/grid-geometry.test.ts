@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  brushBounds,
+  clearMaskRect,
+  collectFillMask,
   collectFillRegion,
   computeBrushIndices,
   computeLineIndices,
   computeShapeCells,
+  createMask,
   MAX_SEGMENT_STEPS,
+  stampCells,
   traceWorldSegment,
 } from "./grid-geometry";
+import { createBuffer, packColor, TRANSPARENT_PIXEL, type PixelBuffer } from "./pixel-buffer";
 import type { PixelValue } from "./PixelPencilTypes";
 
 const grid = { width: 5, height: 5 };
@@ -227,5 +233,142 @@ describe("collectFillRegion", () => {
     const copy = [...pixels];
     collectFillRegion(pixels, at(0, 0), 5, 5);
     expect(pixels).toEqual(copy);
+  });
+});
+
+describe("collectFillMask", () => {
+  const toBuffer = (values: PixelValue[], width: number, height: number): PixelBuffer => {
+    const buffer = createBuffer(width, height);
+    values.forEach((value, i) => {
+      buffer.data[i] = value === null ? 0 : packColor(value);
+    });
+    return buffer;
+  };
+  const setCells = (result: { mask: Uint8Array } | null) =>
+    sorted(Array.from(result!.mask.keys()).filter((i) => result!.mask[i] === 1));
+
+  const pixels: PixelValue[] = [
+    "#aa0000", "#aa0000", null, "#bb0000", "#bb0000",
+    "#aa0000", null, null, "#bb0000", null,
+    null, null, "#cc0000", null, null,
+    "#bb0000", null, null, null, "#aa0000",
+    "#bb0000", "#bb0000", null, "#aa0000", "#aa0000",
+  ];
+  const buffer = toBuffer(pixels, 5, 5);
+
+  it("matches a four-connected region and reports its bounds", () => {
+    const wall = createBuffer(5, 5);
+    for (let i = 0; i < 5; i += 1) wall.data[at(i, 4 - i)] = packColor("#ff0000");
+    const result = collectFillMask(wall, at(0, 0))!;
+    const expected: number[] = [];
+    for (let y = 0; y < 5; y += 1) for (let x = 0; x < 5; x += 1) if (x + y < 4) expected.push(at(x, y));
+    expect(setCells(result)).toEqual(expected);
+    expect(expected).toHaveLength(10);
+    expect(result.bounds).toEqual({ x: 0, y: 0, width: 4, height: 4 });
+  });
+
+  it("collects the region sharing the start cell's value", () => {
+    expect(setCells(collectFillMask(buffer, at(0, 0)))).toEqual([at(0, 0), at(1, 0), at(0, 1)]);
+    expect(setCells(collectFillMask(buffer, at(4, 4)))).toEqual([at(4, 3), at(3, 4), at(4, 4)]);
+  });
+
+  it("does not leak across diagonals or into other colors", () => {
+    const result = collectFillMask(buffer, at(3, 0))!;
+    expect(setCells(result)).toEqual([at(3, 0), at(4, 0), at(3, 1)]);
+    expect(result.mask[at(4, 3)]).toBe(0);
+  });
+
+  it("fills the connected empty region without crossing painted cells", () => {
+    const empty = setCells(collectFillMask(buffer, at(2, 0)));
+    expect(empty).toContain(at(2, 0));
+    expect(empty).toContain(at(1, 1));
+    expect(empty).toContain(at(3, 3));
+    expect(empty).not.toContain(at(2, 2));
+    expect(empty).not.toContain(at(0, 0));
+  });
+
+  it("returns just the start cell when it is isolated", () => {
+    const result = collectFillMask(buffer, at(2, 2))!;
+    expect(setCells(result)).toEqual([at(2, 2)]);
+    expect(result.bounds).toEqual({ x: 2, y: 2, width: 1, height: 1 });
+  });
+
+  it("returns every cell of a uniformly filled grid", () => {
+    const solid = toBuffer(new Array(9).fill("#ffffff"), 3, 3);
+    const result = collectFillMask(solid, 4)!;
+    expect(setCells(result)).toHaveLength(9);
+    expect(result.bounds).toEqual({ x: 0, y: 0, width: 3, height: 3 });
+  });
+
+  it("fills winding regions that need multiple scanline passes", () => {
+    // a U shape: left and right columns joined along the bottom
+    const u = toBuffer(
+      [
+        null, "#111111", null,
+        null, "#111111", null,
+        null, null, null,
+      ],
+      3,
+      3,
+    );
+    expect(setCells(collectFillMask(u, 0)).length).toBe(7);
+  });
+
+  it("fills transparent paint separately from empty cells", () => {
+    const row = createBuffer(5, 1);
+    row.data.fill(TRANSPARENT_PIXEL, 0, 3);
+    const result = collectFillMask(row, 0)!;
+    expect(setCells(result)).toEqual([0, 1, 2]);
+    expect(result.bounds).toEqual({ x: 0, y: 0, width: 3, height: 1 });
+  });
+
+  it("returns null for an out-of-range start", () => {
+    expect(collectFillMask(createBuffer(3, 3), -1)).toBeNull();
+    expect(collectFillMask(createBuffer(3, 3), 9)).toBeNull();
+  });
+
+  it("does not mutate the buffer", () => {
+    const before = Array.from(buffer.data);
+    collectFillMask(buffer, at(0, 0));
+    expect(Array.from(buffer.data)).toEqual(before);
+  });
+});
+
+describe("mask helpers", () => {
+  const g = { width: 6, height: 6 };
+
+  it("stampCells sets cells and grows the bounds", () => {
+    const mask = createMask(g);
+    expect(mask).toHaveLength(36);
+    const first = stampCells(mask, g, [7, 8], null);
+    expect(first).toEqual({ x: 1, y: 1, width: 2, height: 1 });
+    const second = stampCells(mask, g, [28], first);
+    expect(second).toEqual({ x: 1, y: 1, width: 4, height: 4 });
+    expect(mask[7]).toBe(1);
+    expect(mask[28]).toBe(1);
+    expect(mask[0]).toBe(0);
+  });
+
+  it("stampCells tolerates an empty list", () => {
+    const mask = createMask(g);
+    expect(stampCells(mask, g, [], null)).toBeNull();
+    const bounds = { x: 1, y: 1, width: 1, height: 1 };
+    expect(stampCells(mask, g, [], bounds)).toBe(bounds);
+  });
+
+  it("clearMaskRect clears only cells inside the rect", () => {
+    const mask = createMask(g);
+    stampCells(mask, g, [0, 7, 8, 35], null);
+    clearMaskRect(mask, g, { x: 1, y: 1, width: 2, height: 1 });
+    expect(mask[7]).toBe(0);
+    expect(mask[8]).toBe(0);
+    expect(mask[0]).toBe(1);
+    expect(mask[35]).toBe(1);
+  });
+
+  it("brushBounds clips the brush square to the grid", () => {
+    expect(brushBounds({ width: 8, height: 8 }, 0, 4)).toEqual({ x: 0, y: 0, width: 3, height: 3 });
+    expect(brushBounds({ width: 8, height: 8 }, 3 * 8 + 3, 3)).toEqual({ x: 2, y: 2, width: 3, height: 3 });
+    expect(brushBounds({ width: 8, height: 8 }, 7 * 8 + 7, 4)).toEqual({ x: 6, y: 6, width: 2, height: 2 });
   });
 });
