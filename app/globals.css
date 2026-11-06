@@ -30,19 +30,19 @@ body {
 /* Canvas selection overlay, rendered by PixelGrid. */
 @keyframes pixelSelectionDash {
   from {
-    background-position: 0 0, 0 0, 0 100%, 100% 0;
+    background-position: var(--dash-x, 0px) 0, 0 var(--dash-y, 0px), var(--dash-x, 0px) 100%, 100% var(--dash-y, 0px);
   }
   to {
-    background-position: 8px 0, 0 8px, -8px 100%, 100% -8px;
+    background-position: calc(8px + var(--dash-x, 0px)) 0, 0 calc(8px + var(--dash-y, 0px)), calc(-8px + var(--dash-x, 0px)) 100%, 100% calc(-8px + var(--dash-y, 0px));
   }
 }
 
 @keyframes pixelSelectionDashSolid {
   from {
-    background-position: 0 0, 0 0, 0 100%, 100% 0, 6px 0, 0 6px, 6px 100%, 100% 6px;
+    background-position: var(--dash-x, 0px) 0, 0 var(--dash-y, 0px), var(--dash-x, 0px) 100%, 100% var(--dash-y, 0px), calc(6px + var(--dash-x, 0px)) 0, 0 calc(6px + var(--dash-y, 0px)), calc(6px + var(--dash-x, 0px)) 100%, 100% calc(6px + var(--dash-y, 0px));
   }
   to {
-    background-position: 12px 0, 0 12px, -12px 100%, 100% -12px, 18px 0, 0 18px, -6px 100%, 100% -6px;
+    background-position: calc(12px + var(--dash-x, 0px)) 0, 0 calc(12px + var(--dash-y, 0px)), calc(-12px + var(--dash-x, 0px)) 100%, 100% calc(-12px + var(--dash-y, 0px)), calc(18px + var(--dash-x, 0px)) 0, 0 calc(18px + var(--dash-y, 0px)), calc(-6px + var(--dash-x, 0px)) 100%, 100% calc(-6px + var(--dash-y, 0px));
   }
 }
 

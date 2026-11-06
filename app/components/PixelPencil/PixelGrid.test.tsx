@@ -36,6 +36,7 @@ type HarnessProps = {
   width?: number;
   height?: number;
   viewportSize?: number;
+  cellSize?: number;
   initialScroll?: { x: number; y: number };
   tool?: string;
   cursorTool?: PaintTool;
@@ -52,6 +53,7 @@ function GridHarness({
   width = 4,
   height = 4,
   viewportSize = 100,
+  cellSize = 10,
   initialScroll = { x: 0, y: 0 },
   tool = "pencil",
   cursorTool = PencilTool,
@@ -68,8 +70,8 @@ function GridHarness({
   const ownDirtyRef = useRef<DirtyRect | null>(null);
   const gridRef = useRef<HTMLCanvasElement | null>(null);
   const gridWrapperRef = useRef<HTMLDivElement | null>(null);
-  const contentWidth = width * 10;
-  const contentHeight = height * 10;
+  const contentWidth = width * cellSize;
+  const contentHeight = height * cellSize;
   const boundsX = includePanOffset(getPanBounds(contentWidth, viewportSize, contentWidth <= viewportSize ? (viewportSize - contentWidth) / 2 : 0), scroll.x);
   const boundsY = includePanOffset(getPanBounds(contentHeight, viewportSize, contentHeight <= viewportSize ? (viewportSize - contentHeight) / 2 : 0), scroll.y);
   const changeScroll = (update: SetStateAction<{ x: number; y: number }>) => {
@@ -85,7 +87,7 @@ function GridHarness({
       <PixelGrid
         gridWidth={width}
         gridHeight={height}
-        displayCellSize={10}
+        displayCellSize={cellSize}
         gridWrapperRef={gridWrapperRef as MutableRefObject<HTMLDivElement | null>}
         gridRef={gridRef as MutableRefObject<HTMLCanvasElement | null>}
         composite={composite ?? ownComposite}
@@ -426,6 +428,58 @@ describe("PixelGrid panning", () => {
     expect(overlay).toHaveBeenCalledTimes(callsBefore + 1);
     // One composite blit and one overlay blit over the hovered cell.
     expect(drawDestinations(context)).toEqual([[30, 30, 40, 40], [40, 40, 10, 10]]);
+  });
+
+  describe("selection outline clipping", () => {
+    const MARGIN = 4.1; // border thickness (0.1) + 4 px
+    const selectionOf = (x: number, y: number, size: number): SelectionState => ({
+      rect: { x, y, width: size, height: size },
+      offset: { dx: 0, dy: 0 },
+      data: new Uint32Array(0),
+      isFloating: false,
+    });
+
+    it("clips the selection outline to the viewport", () => {
+      const { container } = render(
+        <GridHarness width={2000} height={2000} cellSize={8} viewportSize={100} selectionOverlay={selectionOf(0, 0, 2000)} />,
+      );
+      const outline = container.querySelector<HTMLElement>(".selection-border");
+      expect(outline).not.toBeNull();
+      // Left/top sit 0.05 px outside the viewport; right/bottom are cut at viewport + margin.
+      expect(parseFloat(outline!.style.left)).toBeCloseTo(-0.05, 5);
+      expect(parseFloat(outline!.style.top)).toBeCloseTo(-0.05, 5);
+      expect(parseFloat(outline!.style.width)).toBeCloseTo(100 + MARGIN + 0.05, 5);
+      expect(parseFloat(outline!.style.height)).toBeCloseTo(100 + MARGIN + 0.05, 5);
+      expect(parseFloat(outline!.style.width)).toBeLessThanOrEqual(100 + 2 * MARGIN);
+      expect(parseFloat(outline!.style.left)).toBeGreaterThanOrEqual(-MARGIN);
+    });
+
+    it("keeps a small on-screen selection unclipped", () => {
+      const { container } = render(<GridHarness selectionOverlay={selectionOf(1, 1, 4)} />);
+      const outline = container.querySelector<HTMLElement>(".selection-border")!;
+      expect(outline.style.left).toBe("39.95px");
+      expect(outline.style.top).toBe("39.95px");
+      expect(parseFloat(outline.style.width)).toBeCloseTo(40.1, 5);
+      expect(parseFloat(outline.style.height)).toBeCloseTo(40.1, 5);
+      expect(outline.style.getPropertyValue("--dash-x")).toBe("0px");
+      expect(outline.style.getPropertyValue("--dash-y")).toBe("0px");
+    });
+
+    it("keeps the dash phase anchored to the real corner when the left edge is clipped", () => {
+      const { container } = render(
+        <GridHarness width={40} height={40} initialScroll={{ x: 50, y: 0 }} selectionOverlay={selectionOf(0, 5, 20)} />,
+      );
+      const outline = container.querySelector<HTMLElement>(".selection-border")!;
+      expect(outline.style.left).toBe(`${-MARGIN}px`);
+      expect(parseFloat(outline.style.getPropertyValue("--dash-x"))).toBeCloseTo(-50.05 + MARGIN, 5);
+    });
+
+    it("hides an outline that is entirely off-screen", () => {
+      const { container } = render(
+        <GridHarness width={40} height={40} initialScroll={{ x: 150, y: 150 }} selectionOverlay={selectionOf(0, 0, 2)} />,
+      );
+      expect(container.querySelectorAll(".selection-border")).toHaveLength(0);
+    });
   });
 
   it("the floating selection draws no per-pixel DOM nodes", () => {

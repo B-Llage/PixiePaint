@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent, RefObject } from "react";
 
 import { SelectionRect, SelectionState } from "./PixelPencilTypes";
 import { clampPan, getPanBounds, includePanOffset } from "./canvas-pan";
@@ -81,6 +81,8 @@ const HORIZONTAL_TRACK_MARGIN = 37;
 const VERTICAL_HANDLE_PADDING = 0;
 const HORIZONTAL_HANDLE_PADDING = 0;
 const SELECTION_BORDER_THICKNESS = 0.1;
+/** Outline elements extend this far past the viewport so a clipped edge stays hidden. */
+const SELECTION_CLIP_MARGIN = SELECTION_BORDER_THICKNESS + 4;
 const ZOOM_WHEEL_THRESHOLD = 60;
 const ZOOM_GESTURE_THRESHOLD = 0.15;
 // WheelEvent.deltaMode values.
@@ -200,15 +202,33 @@ export function PixelGrid({
       const width = Math.max(1, rect.width * displayCellSize);
       const height = Math.max(1, rect.height * displayCellSize);
       const halfBorder = SELECTION_BORDER_THICKNESS / 2;
+      const boxLeft = left - halfBorder;
+      const boxTop = top - halfBorder;
+      const boxRight = boxLeft + width + SELECTION_BORDER_THICKNESS;
+      const boxBottom = boxTop + height + SELECTION_BORDER_THICKNESS;
+      // Clip to the viewport so a huge selection never becomes a huge animated layer.
+      const clippedLeft = Math.max(boxLeft, -SELECTION_CLIP_MARGIN);
+      const clippedTop = Math.max(boxTop, -SELECTION_CLIP_MARGIN);
+      const clippedRight = Math.min(boxRight, viewport.width + SELECTION_CLIP_MARGIN);
+      const clippedBottom = Math.min(boxBottom, viewport.height + SELECTION_CLIP_MARGIN);
+      if (clippedRight <= clippedLeft || clippedBottom <= clippedTop) return null;
       return {
-        left: left - halfBorder,
-        top: top - halfBorder,
-        width: width + SELECTION_BORDER_THICKNESS,
-        height: height + SELECTION_BORDER_THICKNESS,
-      };
+        left: clippedLeft,
+        top: clippedTop,
+        width: clippedRight - clippedLeft,
+        height: clippedBottom - clippedTop,
+        // Keeps the dash phase anchored to the real top-left corner (see globals.css).
+        "--dash-x": `${boxLeft - clippedLeft}px`,
+        "--dash-y": `${boxTop - clippedTop}px`,
+      } as CSSProperties;
     },
-    [displayCellSize, renderOffsetX, renderOffsetY, scrollOriginX, scrollOriginY],
+    [displayCellSize, renderOffsetX, renderOffsetY, scrollOriginX, scrollOriginY, viewport.height, viewport.width],
   );
+
+  const previewStyle = selectionPreviewRect ? getSelectionStyle(selectionPreviewRect) : null;
+  const overlayStyle = selectionOverlay
+    ? getSelectionStyle(selectionOverlay.rect, selectionOverlay.offset)
+    : null;
 
   const lockBodyScroll = useCallback(() => {
     if (typeof document === "undefined") return;
@@ -800,17 +820,14 @@ export function PixelGrid({
 
       {(selectionPreviewRect || selectionOverlay) && (
         <div className="pointer-events-none absolute inset-0">
-          {selectionPreviewRect && (
+          {previewStyle && (
             <div
               className="selection-border selection-border--solid selection-border--preview selection-border--no-fill"
-              style={getSelectionStyle(selectionPreviewRect)}
+              style={previewStyle}
             />
           )}
-          {selectionOverlay && (
-            <div
-              className="selection-border selection-border--solid"
-              style={getSelectionStyle(selectionOverlay.rect, selectionOverlay.offset)}
-            />
+          {overlayStyle && (
+            <div className="selection-border selection-border--solid" style={overlayStyle} />
           )}
         </div>
       )}
