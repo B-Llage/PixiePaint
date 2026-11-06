@@ -131,3 +131,24 @@ export const generateLayerName = (existingLayers: readonly Layer[]) => {
   }
   return `Layer ${suffix}`;
 };
+
+/**
+ * Copies a row-major pixel array onto a grid of a different size, anchored at
+ * the top-left corner. Cells outside the new grid are dropped; new cells are
+ * `null`.
+ */
+export function resizePixels(
+  pixels: readonly PixelValue[],
+  previous: { width: number; height: number },
+  next: { width: number; height: number },
+): PixelValue[] {
+  const resized = new Array(next.width * next.height).fill(null) as PixelValue[];
+  const copyWidth = Math.min(previous.width, next.width);
+  const copyHeight = Math.min(previous.height, next.height);
+  for (let y = 0; y < copyHeight; y += 1) {
+    for (let x = 0; x < copyWidth; x += 1) {
+      resized[y * next.width + x] = pixels[y * previous.width + x] ?? null;
+    }
+  }
+  return resized;
+}

@@ -30,6 +30,7 @@ import {
   cloneSelection,
   composeLayers,
   generateLayerName,
+  resizePixels,
 } from "./pixel-operations";
 import {
   collectFillRegion,
@@ -44,6 +45,7 @@ import { useCanvasViewport } from "./hooks/useCanvasViewport";
 import { useSelectionGestures, useSelectionState } from "./hooks/useSelection";
 import { useMoveDrag } from "./hooks/useMoveDrag";
 import { useStrokePipeline } from "./hooks/useStrokePipeline";
+import { useLayerPreviews } from "./hooks/useLayerPreviews";
 import packageJson from "../../../package.json";
 
 const PALETTE_THEMES: readonly PaletteTheme[] = PixelPencilPalettes;
@@ -51,7 +53,6 @@ const PALETTE_THEMES: readonly PaletteTheme[] = PixelPencilPalettes;
 const APP_VERSION = packageJson.version;
 // Below Tailwind's `md` breakpoint the Layers and Palette panels become bottom sheets.
 const MOBILE_MEDIA_QUERY = "(max-width: 767px)";
-const LAYER_PREVIEW_MAX_SIZE = 64; // px, longest side of a layer thumbnail
 // A 32-cell grid defaults to 16px cells; other grid sizes scale to keep a similar footprint.
 const AUTO_CELL_SIZE_REFERENCE_GRID = 32;
 const AUTO_CELL_SIZE_REFERENCE_CELL = 16;
@@ -102,7 +103,7 @@ export function PixelPencil() {
   const [compositePixels, setCompositePixels, compositePixelsRef] = useStateWithRef<PixelValue[]>(
     () => createEmptyPixelArray(),
   );
-  const [layerPreviews, setLayerPreviews] = useState<Record<string, string>>({});
+  const layerPreviews = useLayerPreviews(layers, gridWidth, gridHeight);
   const [paletteThemeId, setPaletteThemeId] = useState<
     (typeof PALETTE_THEMES)[number]["id"]
   >(PALETTE_THEMES[0].id);
@@ -140,7 +141,9 @@ export function PixelPencil() {
   const ignoredCanvasPointerIdRef = useRef<number | null>(null);
   const [dragStartIndex, setDragStartIndex] = useState<number | null>(null);
   const [pathPreview, setPathPreview] = useState<Set<number> | null>(null);
-  const prevDimensionsRef = useRef({ width: gridWidth, height: gridHeight });
+  // The grid size the layers' pixel arrays are laid out for; see the resize
+  // migration below.
+  const [layerDimensions, setLayerDimensions] = useState({ width: gridWidth, height: gridHeight });
   const [isMobile, setIsMobile] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<"layers" | "palette" | null>(null);
   const mobileLayersButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -307,68 +310,6 @@ export function PixelPencil() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (!layers.length || gridWidth <= 0 || gridHeight <= 0) {
-      // Previews are derived from the layers; clearing them here keeps the
-      // render-frame generation below as the single writer of this state.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setLayerPreviews({});
-      return;
-    }
-    let cancelled = false;
-    const frame = window.requestAnimationFrame(() => {
-      const maxDimension = Math.max(gridWidth, gridHeight);
-      const scale = Math.max(1, Math.floor(LAYER_PREVIEW_MAX_SIZE / maxDimension));
-      const canvas = document.createElement("canvas");
-      canvas.width = gridWidth * scale;
-      canvas.height = gridHeight * scale;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-
-      ctx.imageSmoothingEnabled = false;
-
-      const checkerSize = Math.max(scale, 2);
-      const previews: Record<string, string> = {};
-
-      const drawCheckerboard = () => {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = "#e4e4e7";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = "#f4f4f5";
-        for (let y = 0; y < canvas.height; y += checkerSize) {
-          const offset = (Math.floor(y / checkerSize) % 2) * checkerSize;
-          for (let x = offset; x < canvas.width; x += checkerSize * 2) {
-            ctx.fillRect(x, y, checkerSize, checkerSize);
-          }
-        }
-      };
-
-      for (const layer of layers) {
-        drawCheckerboard();
-        ctx.globalAlpha = layer.visible ? 1 : 0.4;
-        for (let index = 0; index < layer.pixels.length; index += 1) {
-          const color = layer.pixels[index];
-          if (color === null || color === "transparent") continue;
-          const { x, y } = indexToCoords(index);
-          ctx.fillStyle = color;
-          ctx.fillRect(x * scale, y * scale, scale, scale);
-        }
-        ctx.globalAlpha = 1;
-        previews[layer.id] = canvas.toDataURL("image/png");
-      }
-
-      if (!cancelled) {
-        setLayerPreviews(previews);
-      }
-    });
-
-    return () => {
-      cancelled = true;
-      window.cancelAnimationFrame(frame);
-    };
-  }, [gridHeight, gridWidth, indexToCoords, layers]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
     const query = window.matchMedia(MOBILE_MEDIA_QUERY);
     const update = () => {
       setIsMobile(query.matches);
@@ -479,56 +420,28 @@ export function PixelPencil() {
     setCompositePixels(composed);
   }, [layers, setCompositePixels, totalCells]);
 
-  useEffect(() => {
-    const prev = prevDimensionsRef.current;
-    if (prev.width === gridWidth && prev.height === gridHeight) {
-      return;
+  // Migrates the artwork when the grid size setting changes, adjusting state
+  // during the render that first sees the new size so no frame renders the
+  // layers against the wrong dimensions. Pixels keep their top-left anchored
+  // position; cells outside the new grid are dropped and new cells are empty.
+  // The hover cell no longer maps to the same pixel afterwards, and history
+  // snapshots were taken at the old size, so both are cleared.
+  if (layerDimensions.width !== gridWidth || layerDimensions.height !== gridHeight) {
+    const nextDimensions = { width: gridWidth, height: gridHeight };
+    setLayerDimensions(nextDimensions);
+    const nextLayers = setLayers((prevLayers) =>
+      prevLayers.map((layer) => ({
+        ...layer,
+        pixels: resizePixels(layer.pixels, layerDimensions, nextDimensions),
+      })),
+    );
+    const activeLayer = nextLayers.find((layer) => layer.id === activeLayerId);
+    if (activeLayer) {
+      setActiveLayerPixelsState(activeLayer.pixels.slice());
     }
-
-    const copyWidth = Math.min(prev.width, gridWidth);
-    const copyHeight = Math.min(prev.height, gridHeight);
-
-    setLayers((prevLayers) => {
-      const nextLayers = prevLayers.map((layer) => {
-        const nextPixels = new Array(totalCells).fill(null) as PixelValue[];
-        for (let y = 0; y < copyHeight; y += 1) {
-          for (let x = 0; x < copyWidth; x += 1) {
-            const oldIndex = y * prev.width + x;
-            const newIndex = y * gridWidth + x;
-            nextPixels[newIndex] = layer.pixels[oldIndex] ?? null;
-          }
-        }
-        return {
-          ...layer,
-          pixels: nextPixels,
-        };
-      });
-      const activeLayer = nextLayers.find(
-        (layer) => layer.id === activeLayerId,
-      );
-      if (activeLayer) {
-        const cloned = activeLayer.pixels.slice();
-        setActiveLayerPixelsState(cloned);
-      }
-      return nextLayers;
-    });
-
-    prevDimensionsRef.current = { width: gridWidth, height: gridHeight };
     clearHistory();
-    // This effect migrates the artwork when the grid size setting changes;
-    // the hover cell no longer maps to the same pixel afterwards.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setHoverIndexIfChanged(null);
-  }, [
-    activeLayerId,
-    clearHistory,
-    gridHeight,
-    gridWidth,
-    setActiveLayerPixelsState,
-    setHoverIndexIfChanged,
-    setLayers,
-    totalCells,
-  ]);
+  }
 
   // Choosing a new grid size resets the persisted canvas pixel size to the
   // closest option that keeps the artwork at a similar on-screen size.

@@ -189,6 +189,44 @@ describe("PixelPencil move tool", () => {
   });
 });
 
+describe("PixelPencil grid resize", () => {
+  const undoButton = () => screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement;
+  const gridWidth = () => Number(screen.getByTestId("grid-width").textContent);
+
+  it("keeps overlapping pixels in place, clears history, and clears the hover cell", async () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Paint center" }));
+    await waitFor(() => expect(paintedCells()).toEqual([4 * 32 + 4]));
+    fireEvent.click(screen.getByRole("button", { name: "Hover center cell" }));
+    expect(brushPreview()).toEqual([4 * 32 + 4]);
+    expect(undoButton().disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const [widthOption] = screen.getAllByRole("button", { name: "64px" });
+    fireEvent.click(widthOption);
+
+    // The painted cell stays at (4, 4), re-indexed for the wider grid.
+    expect(gridWidth()).toBe(64);
+    expect(paintedCells()).toEqual([4 * 64 + 4]);
+    expect(brushPreview()).toEqual([]);
+    expect(undoButton().disabled).toBe(true);
+
+    // Shrinking keeps the top-left region, so (4, 4) survives a 16px width.
+    const [narrowOption] = screen.getAllByRole("button", { name: "16px" });
+    fireEvent.click(narrowOption);
+    expect(gridWidth()).toBe(16);
+    expect(paintedCells()).toEqual([4 * 16 + 4]);
+    expect(undoButton().disabled).toBe(true);
+
+    // The resized artwork is editable and records history again.
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Paint origin" }));
+    await waitFor(() => expect(paintedCells()).toEqual([0, 4 * 16 + 4]));
+    expect(undoButton().disabled).toBe(false);
+  });
+});
+
 describe("PixelPencil viewport", () => {
   it("updates the canvas pointer settings when the setting or selected tool changes", () => {
     render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
