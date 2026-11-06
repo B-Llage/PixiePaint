@@ -6,6 +6,8 @@ export const MAX_HISTORY = 15;
 export const MAX_BRUSH_SIZE = 256;
 export const EXPORT_SCALES = [1, 3, 5, 10] as const;
 export const MAX_ZOOM_SCALE = 5;
+export const MIN_CELL_SIZE_MOBILE = 1;
+export const MIN_CELL_SIZE_DESKTOP = 4;
 
 export const BRUSH_SHAPES = [
   { id: "square", label: "Square" },
