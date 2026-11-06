@@ -67,7 +67,7 @@ function createContextStub(options: { pattern?: boolean } = {}) {
     drawImage: (...args: unknown[]) => {
       calls.push({ name: "drawImage", args: [...args], fillStyle: context.imageSmoothingEnabled });
     },
-    createPattern: vi.fn((..._args: unknown[]) => (options.pattern ? { kind: "pattern" } : null)),
+    createPattern: vi.fn<(tile: HTMLCanvasElement) => { kind: string } | null>(() => (options.pattern ? { kind: "pattern" } : null)),
   };
   return context;
 }
