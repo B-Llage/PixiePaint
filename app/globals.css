@@ -24,3 +24,59 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Canvas selection overlay, rendered by PixelGrid. */
+@keyframes pixelSelectionDash {
+  from {
+    background-position: 0 0, 0 0, 0 100%, 100% 0;
+  }
+  to {
+    background-position: 8px 0, 0 8px, -8px 100%, 100% -8px;
+  }
+}
+
+@keyframes pixelSelectionDashSolid {
+  from {
+    background-position: 0 0, 0 0, 0 100%, 100% 0, 6px 0, 0 6px, 6px 100%, 100% 6px;
+  }
+  to {
+    background-position: 12px 0, 0 12px, -12px 100%, 100% -12px, 18px 0, 0 18px, -6px 100%, 100% -6px;
+  }
+}
+
+.selection-border {
+  position: absolute;
+  box-sizing: border-box;
+  background-image:
+    repeating-linear-gradient(90deg, rgba(255,255,255,0.95) 0, rgba(255,255,255,0.95) 4px, transparent 4px, transparent 8px),
+    repeating-linear-gradient(180deg, rgba(255,255,255,0.95) 0, rgba(255,255,255,0.95) 4px, transparent 4px, transparent 8px),
+    repeating-linear-gradient(90deg, rgba(15,23,42,0.95) 0, rgba(15,23,42,0.95) 4px, transparent 4px, transparent 8px),
+    repeating-linear-gradient(180deg, rgba(15,23,42,0.95) 0, rgba(15,23,42,0.95) 4px, transparent 4px, transparent 8px);
+  background-size: 8px 2px, 2px 8px, 8px 2px, 2px 8px;
+  background-repeat: repeat-x, repeat-y, repeat-x, repeat-y;
+  background-position: 0 0, 0 0, 0 100%, 100% 0;
+  animation: pixelSelectionDash 0.5s linear infinite;
+}
+
+.selection-border--preview {
+  opacity: 0.75;
+}
+
+.selection-border--solid {
+  background-image:
+    linear-gradient(90deg, rgba(15,23,42,0.9) 50%, transparent 50%),
+    linear-gradient(180deg, rgba(15,23,42,0.9) 50%, transparent 50%),
+    linear-gradient(90deg, rgba(15,23,42,0.9) 50%, transparent 50%),
+    linear-gradient(180deg, rgba(15,23,42,0.9) 50%, transparent 50%),
+    linear-gradient(90deg, rgba(255,255,255,0.95) 50%, transparent 50%),
+    linear-gradient(180deg, rgba(255,255,255,0.95) 50%, transparent 50%),
+    linear-gradient(90deg, rgba(255,255,255,0.95) 50%, transparent 50%),
+    linear-gradient(180deg, rgba(255,255,255,0.95) 50%, transparent 50%);
+  background-size: 12px 2px, 2px 12px, 12px 2px, 2px 12px, 12px 2px, 2px 12px, 12px 2px, 2px 12px;
+  background-position: 0 0, 0 0, 0 100%, 100% 0, 6px 0, 0 6px, 6px 100%, 100% 6px;
+  animation: pixelSelectionDashSolid 0.75s linear infinite;
+}
+
+.selection-floating-pixel {
+  position: absolute;
+}

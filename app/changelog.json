@@ -1,0 +1,54 @@
+[
+  {
+    "version": "0.3.1",
+    "title": "Tool Pointers and Hotkey Fix",
+    "changes": [
+      "Turn on Use Tool as Mouse Pointer in Settings to show the selected tool's icon as the canvas cursor.",
+      "The Hotkeys dialog now lists the real keys for Magnifier (A) and Line (D).",
+      "Release notes are generated from the in-app changelog."
+    ]
+  },
+  {
+    "version": "0.3.0",
+    "title": "Canvas and Workflow Improvements",
+    "changes": [
+      "Move artwork or selections with the new Move tool, with optional automatic layer picking.",
+      "Rename layers by double-clicking their names.",
+      "Pan with two-finger scrolling or a middle-button drag, and zoom around the cursor with pinch, wheel, or magnifier controls.",
+      "Create custom colors with hue, saturation, and lightness sliders.",
+      "Type or drag to set brush sizes from 1 to 256 pixels, with an on-canvas size preview.",
+      "Open Layers and Palette in mobile sheets without changing the canvas size.",
+      "See paint previews at their final color, or enable Dim Stroke Preview in Settings."
+    ]
+  },
+  {
+    "version": "0.2.1",
+    "title": "Maintenance Update",
+    "changes": [
+      "Updated Next.js and React to the latest stable releases."
+    ]
+  },
+  {
+    "version": "0.2.0",
+    "title": "PixelPencil Improvements",
+    "changes": [
+      "Fixed Tool Settings scrolling so only the panel scrolls within the layout.",
+      "Locked the app layout to the viewport to avoid full-page scrolling.",
+      "Matched selection preview animation to the final applied selection outline.",
+      "Allowed selections to move outside the canvas with proper cropping on apply.",
+      "Selection moves now restore to the original position on undo.",
+      "Checkerboard background uses grid-based squares with a configurable size.",
+      "Added a checker size option (1-8) in global settings.",
+      "Replaced tool button hover titles with HTML tooltips.",
+      "Added tooltip styling with a border and centered pointer.",
+      "Changelog modal added."
+    ]
+  },
+  {
+    "version": "0.1.0",
+    "title": "Initial Release",
+    "changes": [
+      "Launched Pixie Paint with core drawing tools and layer support."
+    ]
+  }
+]

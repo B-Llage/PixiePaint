@@ -20,6 +20,8 @@ interface PixelPencilSettingsContextValue {
   setPreviewToolEffects: Dispatch<SetStateAction<boolean>>;
   dimStrokePreview: boolean;
   setDimStrokePreview: Dispatch<SetStateAction<boolean>>;
+  useToolAsMousePointer: boolean;
+  setUseToolAsMousePointer: Dispatch<SetStateAction<boolean>>;
   canvasPixelSize: CanvasPixelSizeOption;
   setCanvasPixelSize: Dispatch<SetStateAction<CanvasPixelSizeOption>>;
   gridWidth: GridDimensionOption;
@@ -44,6 +46,7 @@ export function PixelPencilSettingsProvider({
 }) {
   const [previewToolEffects, setPreviewToolEffects] = useState(true);
   const [dimStrokePreview, setDimStrokePreview] = useState(false);
+  const [useToolAsMousePointer, setUseToolAsMousePointer] = useState(false);
   const [canvasPixelSize, setCanvasPixelSize] =
     useState<CanvasPixelSizeOption>(8);
   const [gridWidth, setGridWidth] = useState<GridDimensionOption>(32);
@@ -61,6 +64,7 @@ export function PixelPencilSettingsProvider({
         const parsed = JSON.parse(raw) as Partial<{
           previewToolEffects: boolean;
           dimStrokePreview: boolean;
+          useToolAsMousePointer: boolean;
           canvasPixelSize: CanvasPixelSizeOption;
           gridWidth: GridDimensionOption;
           gridHeight: GridDimensionOption;
@@ -72,6 +76,9 @@ export function PixelPencilSettingsProvider({
         }
         if (typeof parsed.dimStrokePreview === "boolean") {
           setDimStrokePreview(parsed.dimStrokePreview);
+        }
+        if (typeof parsed.useToolAsMousePointer === "boolean") {
+          setUseToolAsMousePointer(parsed.useToolAsMousePointer);
         }
         if (
           parsed.canvasPixelSize &&
@@ -120,6 +127,7 @@ export function PixelPencilSettingsProvider({
     const payload = JSON.stringify({
       previewToolEffects,
       dimStrokePreview,
+      useToolAsMousePointer,
       canvasPixelSize,
       gridWidth,
       gridHeight,
@@ -130,6 +138,7 @@ export function PixelPencilSettingsProvider({
   }, [
     previewToolEffects,
     dimStrokePreview,
+    useToolAsMousePointer,
     canvasPixelSize,
     gridWidth,
     gridHeight,
@@ -144,6 +153,8 @@ export function PixelPencilSettingsProvider({
       setPreviewToolEffects,
       dimStrokePreview,
       setDimStrokePreview,
+      useToolAsMousePointer,
+      setUseToolAsMousePointer,
       canvasPixelSize,
       setCanvasPixelSize,
       gridWidth,
@@ -158,6 +169,7 @@ export function PixelPencilSettingsProvider({
     [
       previewToolEffects,
       dimStrokePreview,
+      useToolAsMousePointer,
       canvasPixelSize,
       gridWidth,
       gridHeight,

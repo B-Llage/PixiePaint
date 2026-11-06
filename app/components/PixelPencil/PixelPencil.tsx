@@ -6,7 +6,6 @@ import type { PointerEvent as ReactPointerEvent, SetStateAction } from "react";
 import {
   BrushShape,
   Layer,
-  PaintTool,
   PaletteColor,
   PaletteTheme,
   PixelValue,
@@ -14,16 +13,17 @@ import {
   SelectionRect,
   SelectionState,
   ShapeKind,
+  ZoomMode,
 } from "./PixelPencilTypes";
-import { BucketTool, ColorPickerTool, EraserTool, LineTool, MagnifierTool, MoveTool, PencilTool, RectSelectionTool, ShapeTool } from "./PixelPencilTools";
+import { PencilTool, TOOLS, type ToolId } from "./PixelPencilTools";
 import { PixelPencilPalettes } from "./PixelPencilPalettes";
 import { CANVAS_PIXEL_SIZE_OPTIONS, usePixelPencilSettings } from "./context/PixelPencilSettingsContext";
 import { MAX_HISTORY, MAX_ZOOM_SCALE } from "./PixelPencil.constants";
 import { usePixelExport } from "./hooks/usePixelExport";
-import { useZoomControls } from "./hooks/useZoomControls";
 import { Toolbox } from "./Toolbox";
 import { ToolSettingsPanel } from "./ToolSettingsPanel";
 import { PalettePanel } from "./PalettePanel";
+import type { SelectedColorStyles } from "./Settings/Tool/SelectedColor";
 import { PixelGrid } from "./PixelGrid";
 import { PixelPencilModals } from "./PixelPencilModals";
 import { LayersPanel } from "./LayersPanel";
@@ -45,24 +45,30 @@ import {
   traceWorldSegment as traceWorldSegmentOnGrid,
 } from "./grid-geometry";
 import { getPanBounds, includePanOffset } from "./canvas-pan";
+import { checkerboardStyle } from "./checkerboard";
+import { useEscapeKey } from "./hooks/useEscapeKey";
 import packageJson from "../../../package.json";
 
-const TOOLS: readonly PaintTool[] = [
-  PencilTool,
-  EraserTool,
-  BucketTool,
-  ColorPickerTool,
-  LineTool,
-  ShapeTool,
-  RectSelectionTool,
-  MoveTool,
-  MagnifierTool,
-] as const;
-
 const PALETTE_THEMES: readonly PaletteTheme[] = PixelPencilPalettes;
-type Tool = (typeof TOOLS)[number]["id"];
 
 const APP_VERSION = packageJson.version;
+// Below Tailwind's `md` breakpoint the Layers and Palette panels become bottom sheets.
+const MOBILE_MEDIA_QUERY = "(max-width: 767px)";
+const LAYER_PREVIEW_MAX_SIZE = 64; // px, longest side of a layer thumbnail
+const MIN_CELL_SIZE_MOBILE = 1;
+const MIN_CELL_SIZE_DESKTOP = 4;
+// A 32-cell grid defaults to 16px cells; other grid sizes scale to keep a similar footprint.
+const AUTO_CELL_SIZE_REFERENCE_GRID = 32;
+const AUTO_CELL_SIZE_REFERENCE_CELL = 16;
+
+const HOTKEY_ITEMS = [
+  ...TOOLS.map((item) => ({ label: item.label, key: item.hotkey.toUpperCase() })),
+  { label: "Pan Canvas", key: "Two-finger scroll / Middle mouse drag" },
+  { label: "Zoom Canvas", key: "Pinch / Mouse wheel / Cmd/Win + Wheel" },
+  { label: "Undo", key: "Ctrl/Cmd + Z" },
+  { label: "Redo", key: "Ctrl/Cmd + Shift + Z" },
+  { label: "Clear", key: "Ctrl/Cmd + Backspace" },
+];
 
 type LayerSnapshot = {
   layers: Layer[];
@@ -91,6 +97,7 @@ export function PixelPencil() {
   const {
     previewToolEffects,
     dimStrokePreview,
+    useToolAsMousePointer,
     canvasPixelSize,
     setCanvasPixelSize,
     gridWidth,
@@ -137,7 +144,7 @@ export function PixelPencil() {
   const [activeColor, setActiveColor] = useState<PaletteColor>(
     PALETTE_THEMES[0].colors[0],
   );
-  const [tool, setTool] = useState<Tool>("pencil");
+  const [tool, setTool] = useState<ToolId>("pencil");
   const [autoPickLayer, setAutoPickLayer] = useState(false);
   const [brushSize, setBrushSize] = useState<number>(1);
   const [brushSizeDragging, setBrushSizeDragging] = useState(false);
@@ -155,7 +162,8 @@ export function PixelPencil() {
   const [isSettingsDialogOpen, setIsSettingsDialogOpen] = useState(false);
   const [isChangelogDialogOpen, setIsChangelogDialogOpen] = useState(false);
   const [isHotkeysDialogOpen, setIsHotkeysDialogOpen] = useState(false);
-  const { zoomScale, setZoomScale, zoomMode, setZoomMode } = useZoomControls();
+  const [zoomScale, setZoomScale] = useState(1);
+  const [zoomMode, setZoomMode] = useState<ZoomMode>("in");
   const isDrawingRef = useRef(false);
   const drawValueRef = useRef<PixelValue>(PALETTE_THEMES[0].colors[0]);
   const [drawValueVersion, setDrawValueVersion] = useState(0);
@@ -177,8 +185,6 @@ export function PixelPencil() {
   const actionInProgressRef = useRef(false);
   const actionModifiedRef = useRef(false);
   const gridWrapperRef = useRef<HTMLDivElement | null>(null);
-  const wrapperParentWidthRef = useRef<number | null>(null);
-  const wrapperParentHeightRef = useRef<number | null>(null);
   const gridRef = useRef<HTMLCanvasElement | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
   const ignoredCanvasPointerIdRef = useRef<number | null>(null);
@@ -231,6 +237,8 @@ export function PixelPencil() {
   const [mobilePanel, setMobilePanel] = useState<"layers" | "palette" | null>(null);
   const mobileLayersButtonRef = useRef<HTMLButtonElement | null>(null);
   const mobilePaletteButtonRef = useRef<HTMLButtonElement | null>(null);
+  // Unlike React's setState, this runs a functional `next` synchronously and
+  // writes through to the refs, so callers may read flags set inside the updater.
   const setActiveLayerPixels = useCallback(
     (
       next:
@@ -643,8 +651,7 @@ export function PixelPencil() {
     let cancelled = false;
     const frame = window.requestAnimationFrame(() => {
       const maxDimension = Math.max(gridWidth, gridHeight);
-      const maxPreviewSize = 64;
-      const scale = Math.max(1, Math.floor(maxPreviewSize / maxDimension));
+      const scale = Math.max(1, Math.floor(LAYER_PREVIEW_MAX_SIZE / maxDimension));
       const canvas = document.createElement("canvas");
       canvas.width = gridWidth * scale;
       canvas.height = gridHeight * scale;
@@ -696,7 +703,7 @@ export function PixelPencil() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const query = window.matchMedia("(max-width: 767px)");
+    const query = window.matchMedia(MOBILE_MEDIA_QUERY);
     const update = () => {
       setIsMobile(query.matches);
       if (!query.matches) setMobilePanel(null);
@@ -711,8 +718,9 @@ export function PixelPencil() {
   }, []);
 
   useEffect(() => {
+    const pointerQueue = pointerQueueRef.current;
     return () => {
-      pointerQueueRef.current.length = 0;
+      pointerQueue.length = 0;
       if (pointerRAFRef.current !== null) {
         window.cancelAnimationFrame(pointerRAFRef.current);
         pointerRAFRef.current = null;
@@ -760,7 +768,7 @@ export function PixelPencil() {
     }
 
     const dimensionLimit = Math.min(...dimensionCandidates);
-    const minCellSize = isMobile ? 1 : 4;
+    const minCellSize = isMobile ? MIN_CELL_SIZE_MOBILE : MIN_CELL_SIZE_DESKTOP;
     const clamped = Math.max(minCellSize, dimensionLimit);
     return Math.min(canvasPixelSize, clamped);
   }, [
@@ -819,6 +827,7 @@ export function PixelPencil() {
     setZoomPanException(false);
   }, [baseCellSize, gridHeight, gridWidth]);
 
+  // Re-clamp the stored offset whenever the pan bounds change (zoom, resize, grid size).
   useEffect(() => {
     setCanvasScrollLimited((previous) => previous);
   }, [setCanvasScrollLimited]);
@@ -906,13 +915,13 @@ export function PixelPencil() {
     totalCells,
   ]);
 
+  // Choosing a new grid size resets the persisted canvas pixel size to the
+  // closest option that keeps the artwork at a similar on-screen size.
   useEffect(() => {
-    const baseDimension = 32;
-    const basePixelSize = 16;
     const largestDimension = Math.max(gridWidth, gridHeight);
     const targetSize = Math.max(
-      4,
-      Math.round((baseDimension / largestDimension) * basePixelSize),
+      MIN_CELL_SIZE_DESKTOP,
+      Math.round((AUTO_CELL_SIZE_REFERENCE_GRID / largestDimension) * AUTO_CELL_SIZE_REFERENCE_CELL),
     );
     let closest = CANVAS_PIXEL_SIZE_OPTIONS[0];
     let smallestDiff = Math.abs(closest - targetSize);
@@ -941,12 +950,7 @@ export function PixelPencil() {
         wrapper.parentElement?.clientHeight ?? measuredHeight;
 
       setAvailableWidth(parentWidth);
-
-      wrapperParentWidthRef.current = parentWidth;
-
       setAvailableHeight(parentHeight);
-
-      wrapperParentHeightRef.current = parentHeight;
     };
     updateSize();
     const observer = new ResizeObserver(updateSize);
@@ -986,12 +990,6 @@ export function PixelPencil() {
       lastPaintedIndexRef.current = null;
     }
   }, [tool]);
-
-  useEffect(() => {
-    updateHistoryState();
-  }, [updateHistoryState]);
-
-
 
   const applySnapshot = useCallback(
     (snapshot: LayerSnapshot) => {
@@ -2430,9 +2428,6 @@ export function PixelPencil() {
       previewToolEffects,
       processDrawingSamples,
       resolvePointerFromClientPoint,
-      clampSelectionOffset,
-      normalizeSelectionRect,
-      setSelection,
       setHoverIndexIfChanged,
       shapeFilled,
       shapeType,
@@ -2440,8 +2435,6 @@ export function PixelPencil() {
       updateShiftLinePreview,
       updateRectSelectionFromClientPoint,
       updateMoveDrag,
-      selectionMoveRef,
-      selectionDraftOriginRef,
     ],
   );
 
@@ -2696,7 +2689,6 @@ export function PixelPencil() {
     };
   }, [tool, updateRectSelectionFromClientPoint]);
 
-  // Render matrix once so React keys stay stable.
   const bucketPreview = useMemo(() => {
     if (!previewToolEffects || hoverIndex === null || tool !== "bucket") return null;
     const targetColor = activeLayerPixels[hoverIndex];
@@ -2710,7 +2702,7 @@ export function PixelPencil() {
       brushSizeDragging ||
       !previewToolEffects ||
       hoverIndex === null ||
-      (tool !== "pencil" && tool !== "eraser")
+      (tool !== "pencil" && tool !== "eraser" && tool !== "line" && tool !== "shape")
     ) {
       return null;
     }
@@ -2776,36 +2768,7 @@ export function PixelPencil() {
     reset();
   }, [reset]);
 
-  const HOTKEYS_MAP = useMemo(
-    () => [
-      { label: "Select", key: "R" },
-      { label: "Move", key: "M" },
-      { label: "Pencil", key: "Q" },
-      { label: "Eraser", key: "W" },
-      { label: "Picker", key: "E" },
-      { label: "Magnifier", key: "Z" },
-      { label: "Bucket", key: "G" },
-      { label: "Shape", key: "S" },
-      { label: "Line", key: "L" },
-      { label: "Pan Canvas", key: "Two-finger scroll / Middle mouse drag" },
-      { label: "Zoom Canvas", key: "Pinch / Mouse wheel / Cmd/Win + Wheel" },
-      { label: "Undo", key: "Ctrl/Cmd + Z" },
-      { label: "Redo", key: "Ctrl/Cmd + Shift + Z" },
-      { label: "Clear", key: "Ctrl/Cmd + Backspace" },
-    ],
-    [],
-  );
-
-  useEffect(() => {
-    if (!isResetDialogOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setIsResetDialogOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isResetDialogOpen]);
+  useEscapeKey(isResetDialogOpen, handleCloseResetDialog);
 
   const handleOpenSettingsDialog = useCallback(() => {
     setIsSettingsDialogOpen(true);
@@ -2823,53 +2786,15 @@ export function PixelPencil() {
     setIsChangelogDialogOpen(false);
   }, []);
 
-  useEffect(() => {
-    if (!isSettingsDialogOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setIsSettingsDialogOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isSettingsDialogOpen]);
-
-  useEffect(() => {
-    if (!isChangelogDialogOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setIsChangelogDialogOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isChangelogDialogOpen]);
+  useEscapeKey(isSettingsDialogOpen, handleCloseSettingsDialog);
+  useEscapeKey(isChangelogDialogOpen, handleCloseChangelogDialog);
 
   const handleCloseHotkeysDialog = useCallback(() => {
     setIsHotkeysDialogOpen(false);
   }, []);
 
-  useEffect(() => {
-    if (!isHotkeysDialogOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setIsHotkeysDialogOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isHotkeysDialogOpen]);
-
-  useEffect(() => {
-    if (!isSaveDialogOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        handleCloseSaveDialog();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [handleCloseSaveDialog, isSaveDialogOpen]);
+  useEscapeKey(isHotkeysDialogOpen, handleCloseHotkeysDialog);
+  useEscapeKey(isSaveDialogOpen, handleCloseSaveDialog);
 
   useEffect(() => {
     const handleGlobalPointerDown = (event: PointerEvent) => {
@@ -2888,17 +2813,13 @@ export function PixelPencil() {
     };
   }, [cancelSelection]);
 
-  const selectedColorStyles = useMemo(() => {
-    const isTransparent = activeColor === "transparent";
-    return {
-      backgroundColor: isTransparent ? "transparent" : activeColor,
-      backgroundImage: isTransparent
-        ? "linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db), linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db)"
-        : undefined,
-      backgroundSize: isTransparent ? "12px 12px" : undefined,
-      backgroundPosition: isTransparent ? "0 0, 6px 6px" : undefined,
-    };
-  }, [activeColor]);
+  const selectedColorStyles = useMemo<SelectedColorStyles>(
+    () =>
+      activeColor === "transparent"
+        ? { backgroundColor: "transparent", ...checkerboardStyle(12) }
+        : { backgroundColor: activeColor },
+    [activeColor],
+  );
 
   const closeMobilePanel = useCallback(() => {
     const button = mobilePanel === "layers" ? mobileLayersButtonRef.current : mobilePaletteButtonRef.current;
@@ -2906,16 +2827,7 @@ export function PixelPencil() {
     button?.focus();
   }, [mobilePanel]);
 
-  useEffect(() => {
-    if (!mobilePanel) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented) {
-        closeMobilePanel();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [closeMobilePanel, mobilePanel]);
+  useEscapeKey(mobilePanel !== null, closeMobilePanel, { ignoreDefaultPrevented: true });
 
   return (
     <>
@@ -3042,6 +2954,9 @@ export function PixelPencil() {
                   drawValueRef={drawValueRef}
                   drawValueVersion={drawValueVersion}
                   tool={tool}
+                  toolCursorIcon={currentTool.cursorIcon}
+                  toolCursorHotspot={currentTool.cursorHotspot}
+                  useToolAsMousePointer={useToolAsMousePointer}
                   wrapperMaxWidth={availableWidth}
                   wrapperMaxHeight={availableHeight}
                   canvasScroll={canvasScroll}
@@ -3173,7 +3088,7 @@ export function PixelPencil() {
         handleCloseChangelogDialog={handleCloseChangelogDialog}
         isHotkeysDialogOpen={isHotkeysDialogOpen}
         handleCloseHotkeysDialog={handleCloseHotkeysDialog}
-        hotkeys={HOTKEYS_MAP}
+        hotkeys={HOTKEY_ITEMS}
         isResetDialogOpen={isResetDialogOpen}
         handleCloseResetDialog={handleCloseResetDialog}
         handleConfirmReset={handleConfirmReset}

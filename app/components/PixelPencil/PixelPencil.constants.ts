@@ -12,6 +12,11 @@ export const BRUSH_SHAPES = [
   { id: "circle", label: "Circle" },
 ] as const;
 
+export const ZOOM_MODE_OPTIONS = [
+  { id: "in", label: "Zoom In" },
+  { id: "out", label: "Zoom Out" },
+] as const;
+
 export const SHAPE_TYPES = [
   { id: "square", label: "Square" },
   { id: "circle", label: "Circle" },

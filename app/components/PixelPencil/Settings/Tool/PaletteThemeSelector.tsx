@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { PaletteColor, PaletteTheme, PixelValue } from "../../PixelPencilTypes";
 import { PixelPencilPalettes } from "../../PixelPencilPalettes";
+import { checkerboardStyle } from "../../checkerboard";
 
 const PALETTE_THEMES: readonly PaletteTheme[] = PixelPencilPalettes;
-interface PaletteColorSelectorProps {
-    paletteThemeId?: string;
+interface PaletteThemeSelectorProps {
+    paletteThemeId: string;
     currentPalette: PaletteTheme;
     drawValueRef: React.RefObject<PixelValue>;
     setPaletteThemeId: React.Dispatch<React.SetStateAction<string>>;
     setActiveColor: React.Dispatch<React.SetStateAction<string>>;
 }
-export function PaletteThemeSelector({ paletteThemeId,  currentPalette, drawValueRef, setPaletteThemeId, setActiveColor, }: PaletteColorSelectorProps) {
+export function PaletteThemeSelector({ paletteThemeId,  currentPalette, drawValueRef, setPaletteThemeId, setActiveColor, }: PaletteThemeSelectorProps) {
     const [isPaletteMenuOpen, setIsPaletteMenuOpen] = useState(false);
     const paletteMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -48,12 +49,7 @@ export function PaletteThemeSelector({ paletteThemeId,  currentPalette, drawValu
                                     key={`${currentPalette.id}-${color}-${index}`}
                                     className="h-3 w-3 rounded-sm border border-zinc-200 dark:border-zinc-700"
                                     style={{
-                                        backgroundColor: isTransparent ? "transparent" : color,
-                                        backgroundImage: isTransparent
-                                            ? "linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db), linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db)"
-                                            : undefined,
-                                        backgroundSize: isTransparent ? "8px 8px" : undefined,
-                                        backgroundPosition: isTransparent ? "0 0, 4px 4px" : undefined,
+                                        ...(isTransparent ? { backgroundColor: "transparent", ...checkerboardStyle(8) } : { backgroundColor: color }),
                                     }}
                                 />
                             );
@@ -95,12 +91,7 @@ export function PaletteThemeSelector({ paletteThemeId,  currentPalette, drawValu
                                                     key={`${theme.id}-preview-${color}-${index}`}
                                                     className="h-3 w-3 rounded-sm border border-zinc-200 dark:border-zinc-700"
                                                     style={{
-                                                        backgroundColor: isTransparent ? "transparent" : color,
-                                                        backgroundImage: isTransparent
-                                                            ? "linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db), linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db)"
-                                                            : undefined,
-                                                        backgroundSize: isTransparent ? "8px 8px" : undefined,
-                                                        backgroundPosition: isTransparent ? "0 0, 4px 4px" : undefined,
+                                                        ...(isTransparent ? { backgroundColor: "transparent", ...checkerboardStyle(8) } : { backgroundColor: color }),
                                                     }}
                                                 />
                                             );

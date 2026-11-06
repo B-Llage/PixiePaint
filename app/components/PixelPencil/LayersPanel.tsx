@@ -11,6 +11,8 @@ import {
   type DragEvent,
 } from "react";
 
+import { checkerboardStyle } from "./checkerboard";
+
 interface LayersPanelProps {
   layers: Array<{ id: string; name: string; visible: boolean }>;
   activeLayerId: string;
@@ -137,14 +139,6 @@ export function LayersPanel({
     [draggedId, handleDragEnd, onReorderLayers, resolveIndex],
   );
 
-  const handleToggleClick = useCallback(
-    (event: MouseEvent<HTMLButtonElement>, id: string) => {
-      event.stopPropagation();
-      onToggleVisibility(id);
-    },
-    [onToggleVisibility],
-  );
-
   const handleDeleteClick = useCallback(
     (event: MouseEvent<HTMLButtonElement>, id: string) => {
       event.stopPropagation();
@@ -198,15 +192,11 @@ export function LayersPanel({
             >
               <div
                 className={`relative h-10 w-10 flex-shrink-0 overflow-hidden rounded border border-zinc-300 dark:border-zinc-600 ${layer.visible ? "" : "opacity-50"}`}
-                style={{
-                  backgroundImage:
-                    "linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db), linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db)",
-                  backgroundSize: "8px 8px",
-                  backgroundPosition: "0 0, 4px 4px",
-                }}
+                style={checkerboardStyle(8)}
                 aria-hidden="true"
               >
                 {previewSrc ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- data URL thumbnail; next/image cannot optimize it
                   <img
                     src={previewSrc}
                     alt=""
@@ -245,7 +235,7 @@ export function LayersPanel({
             <input
               type="checkbox"
               checked={layer.visible}
-              onChange={(event) => handleToggleClick(event as unknown as MouseEvent<HTMLButtonElement>, layer.id)}
+              onChange={() => onToggleVisibility(layer.id)}
               className="h-4 w-4 rounded border border-zinc-400 text-zinc-600 focus:ring-zinc-500 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100"
               aria-label={layer.visible ? "Hide layer" : "Show layer"}
             />
