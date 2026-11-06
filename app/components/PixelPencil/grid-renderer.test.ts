@@ -362,6 +362,11 @@ describe("drawFloatingSelection", () => {
     expect(tiles.length).toBeGreaterThan(0);
     expect(tiles.every((call) => (call.args as number[])[0] >= 50 && (call.args as number[])[0] < 60)).toBe(true);
 
+    // With no cells on screen the transparent tiles are skipped.
+    const offscreen = createContextStub();
+    drawFloatingSelection(asContext(offscreen), selection, view({ originX: 30, originY: 30 }), null);
+    expect(callsNamed(offscreen, "fillRect")).toHaveLength(0);
+
     // A selection that is not floating draws nothing.
     const idle = createContextStub();
     drawFloatingSelection(asContext(idle), { ...selection, isFloating: false }, view());

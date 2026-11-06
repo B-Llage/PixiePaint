@@ -1179,10 +1179,10 @@ export function PixelPencil() {
   const brushPreviewMaskRef = useRef<ScratchMask | null>(null);
   const brushSizeShadowMaskRef = useRef<ScratchMask | null>(null);
   const bucketPreviewCacheRef = useRef<{
-    index: number;
+    hoverIndex: number;
     layerVersion: number;
     buffer: PixelBuffer;
-    preview: PreviewMask | null;
+    mask: PreviewMask | null;
   } | null>(null);
 
   // Builds the overlay for one frame from the hover and preview refs. The grid
@@ -1212,16 +1212,13 @@ export function PixelPencil() {
       const layer = getActiveLayer();
       if (layer && layer.pixels.data.length === cellCount) {
         const cached = bucketPreviewCacheRef.current;
-        if (
-          cached &&
-          cached.index === hover &&
-          cached.layerVersion === layerVersion &&
-          cached.buffer === layer.pixels
-        ) {
-          bucket = cached.preview;
+        const sameLayer = cached && cached.layerVersion === layerVersion && cached.buffer === layer.pixels;
+        if (cached && sameLayer && (cached.hoverIndex === hover || cached.mask?.mask[hover] === 1)) {
+          // Same cell, or another cell inside the cached region (same fill region).
+          bucket = cached.mask;
         } else {
           bucket = collectFillMask(layer.pixels, hover);
-          bucketPreviewCacheRef.current = { index: hover, layerVersion, buffer: layer.pixels, preview: bucket };
+          bucketPreviewCacheRef.current = { hoverIndex: hover, layerVersion, buffer: layer.pixels, mask: bucket };
         }
       }
     }

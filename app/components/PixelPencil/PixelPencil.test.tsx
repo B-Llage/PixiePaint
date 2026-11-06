@@ -9,7 +9,7 @@ import packageJson from "../../../package.json";
 import { PixelPencil } from "./PixelPencil";
 import { MagnifierTool, TOOLS } from "./PixelPencilTools";
 import type { PixelValue } from "./PixelPencilTypes";
-import type { PreviewMask } from "./grid-geometry";
+import { collectFillMask, type PreviewMask } from "./grid-geometry";
 import type { OverlayFrame } from "./grid-renderer";
 import { unpackColor, type PixelBuffer } from "./pixel-buffer";
 
@@ -49,6 +49,11 @@ function maskCells(preview: PreviewMask | null, gridWidth: number): number[] {
 
 const layersPanelRender = vi.hoisted(() => vi.fn());
 
+vi.mock("./grid-geometry", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./grid-geometry")>();
+  return { ...actual, collectFillMask: vi.fn(actual.collectFillMask) };
+});
+
 vi.mock("./LayersPanel", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./LayersPanel")>();
   return {
@@ -67,7 +72,7 @@ vi.mock("./PixelGrid", () => ({
       onViewportResize({ width: 300, height: 300 });
     }, [onViewportResize]);
     // Overlay masks live in refs read at draw time, so tests sample them on demand.
-    const [overlay, setOverlay] = useState<{ brush: number[]; brushSizeShadow: number[] }>({ brush: [], brushSizeShadow: [] });
+    const [overlay, setOverlay] = useState<{ brush: number[]; brushSizeShadow: number[]; bucketSize: number }>({ brush: [], brushSizeShadow: [], bucketSize: 0 });
     const compositeWidth = props.composite.width;
     const compositeValues = Array.from(props.composite.data, (value) => unpackColor(value));
 
@@ -109,8 +114,10 @@ vi.mock("./PixelGrid", () => ({
           setOverlay({
             brush: maskCells(frame.brush, compositeWidth),
             brushSizeShadow: maskCells(frame.brushSizeShadow, compositeWidth),
+            bucketSize: maskCells(frame.bucket, compositeWidth).length,
           });
         }}>Read overlay</button>
+        <output data-testid="bucket-preview">{JSON.stringify(overlay.bucketSize)}</output>
         <output data-testid="selection-rect">{JSON.stringify(props.selectionOverlay?.rect ?? null)}</output>
         <output data-testid="canvas-scroll">{JSON.stringify(props.canvasScroll)}</output>
         <output data-testid="canvas-height">{props.gridHeight * props.displayCellSize}</output>
@@ -575,6 +582,47 @@ describe("PixelPencil viewport", () => {
     fireEvent.click(screen.getByRole("button", { name: "Paint at shifted origin" }));
     await waitFor(() => expect(firstTwoPixels()[0]).not.toBeNull());
     expect(firstTwoPixels()[1]).toBeNull();
+  });
+});
+
+describe("PixelPencil bucket hover preview", () => {
+  const bucketPreviewSize = () => {
+    fireEvent.click(screen.getByRole("button", { name: "Read overlay" }));
+    return Number(screen.getByTestId("bucket-preview").textContent);
+  };
+  const click = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+
+  it("computes the fill region once per hovered region and again after an edit", () => {
+    vi.mocked(collectFillMask).mockClear();
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    click("Bucket");
+
+    click("Hover center cell");
+    expect(bucketPreviewSize()).toBe(32 * 32);
+    expect(bucketPreviewSize()).toBe(32 * 32);
+    expect(collectFillMask).toHaveBeenCalledTimes(1);
+
+    // Other cells inside the same filled region reuse the cached mask.
+    click("Hover cell 1");
+    click("Hover cell 2");
+    expect(bucketPreviewSize()).toBe(32 * 32);
+    expect(collectFillMask).toHaveBeenCalledTimes(1);
+
+    // An edit changes the layer, so the next hover recomputes.
+    click("Pencil");
+    click("Paint origin");
+    click("Bucket");
+    click("Hover center cell");
+    expect(bucketPreviewSize()).toBe(32 * 32 - 1);
+    expect(collectFillMask).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not compute the fill region for other tools", () => {
+    vi.mocked(collectFillMask).mockClear();
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    click("Hover center cell");
+    expect(bucketPreviewSize()).toBe(0);
+    expect(collectFillMask).not.toHaveBeenCalled();
   });
 });
 

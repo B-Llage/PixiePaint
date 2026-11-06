@@ -337,6 +337,48 @@ describe("PixelGrid panning", () => {
     expect(uploads().at(-1)).toEqual([0, 0, 4, 4]);
   });
 
+  it("does not re-upload the whole buffer when a redraw frame consumed the dirty rect before the version commit", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const contexts = stubCanvasContexts();
+    const composite = createBuffer(4, 4);
+    const dirtyRef: { current: DirtyRect | null } = { current: null };
+    const uploads = () =>
+      contexts
+        .all()
+        .flatMap((context) => context.calls)
+        .filter((call) => call.name === "putImageData")
+        .map((call) => call.args.slice(3));
+    let requestRedraw: () => void = () => {};
+    function SignalHarness({ version }: { version: number }) {
+      const redraw = useRedrawSignal();
+      useEffect(() => {
+        requestRedraw = redraw.requestRedraw;
+      }, [redraw.requestRedraw]);
+      return <GridHarness composite={composite} compositeDirtyRef={dirtyRef} compositeVersion={version} redraw={redraw} />;
+    }
+    const { rerender } = render(<SignalHarness version={0} />);
+    expect(uploads()).toEqual([[0, 0, 4, 4]]);
+
+    // A recompose marks its dirty rect and signals a redraw; the frame runs first.
+    composite.data[5] = packColor("#ff0000");
+    dirtyRef.current = { x: 1, y: 1, width: 1, height: 1 };
+    act(() => requestRedraw());
+    act(() => {
+      for (const frame of frames.splice(0)) frame(0);
+    });
+    expect(dirtyRef.current).toBeNull();
+    expect(uploads()).toEqual([[0, 0, 4, 4], [1, 1, 1, 1]]);
+
+    // React then commits the bumped version with no dirty rect left.
+    rerender(<SignalHarness version={1} />);
+    expect(uploads()).toEqual([[0, 0, 4, 4], [1, 1, 1, 1]]);
+  });
+
   it("skips the composite blit while the buffer and grid sizes disagree", () => {
     const contexts = stubCanvasContexts();
     const { container } = render(<GridHarness composite={createBuffer(2, 2)} />);

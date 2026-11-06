@@ -254,6 +254,8 @@ export function PixelGrid({
   // rebuilt for a new buffer and otherwise only re-uploads dirty cells.
   const surfaceRef = useRef<CompositeSurface | null>(null);
   const drawnCompositeVersionRef = useRef<number | null>(null);
+  /** True when a dirty rect was consumed since the last version bump was drawn. */
+  const dirtyConsumedRef = useRef(false);
   const drawRef = useRef<() => void>(() => {});
 
   useEffect(() => {
@@ -311,13 +313,21 @@ export function PixelGrid({
           surface = createCompositeSurface(composite);
           surface.dirty = whole;
           surfaceRef.current = surface;
+          dirtyConsumedRef.current = false;
         } else if (compositeDirtyRef.current) {
           surface.dirty = unionRect(surface.dirty, compositeDirtyRef.current);
-        } else if (drawnCompositeVersionRef.current !== compositeVersion) {
+          dirtyConsumedRef.current = true;
+        } else if (drawnCompositeVersionRef.current !== compositeVersion && !dirtyConsumedRef.current) {
+          // The version advanced with no dirty rect to explain it.
           surface.dirty = whole;
         }
         compositeDirtyRef.current = null;
-        drawnCompositeVersionRef.current = compositeVersion;
+        if (drawnCompositeVersionRef.current !== compositeVersion) {
+          // A redraw-signal frame can consume a recompose's dirty rect before React
+          // commits its version; that rect already covers the bump, so it is settled here.
+          drawnCompositeVersionRef.current = compositeVersion;
+          dirtyConsumedRef.current = false;
+        }
         if (visible) drawComposite(context, surface, view, visible);
       }
 
@@ -328,7 +338,7 @@ export function PixelGrid({
         }
       }
       if (selectionOverlay?.isFloating) {
-        drawFloatingSelection(context, selectionOverlay, view, visible ?? undefined);
+        drawFloatingSelection(context, selectionOverlay, view, visible);
       }
     };
     drawRef.current = draw;

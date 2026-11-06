@@ -429,7 +429,7 @@ export function drawFloatingSelection(
   ctx: CanvasRenderingContext2D,
   selection: SelectionState,
   view: ViewTransform,
-  visible?: DirtyRect,
+  visible?: DirtyRect | null,
 ): void {
   if (!selection.isFloating) return;
   const { rect, offset, data } = selection;
@@ -441,6 +441,8 @@ export function drawFloatingSelection(
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(canvas, 0, 0, rect.width, rect.height, target.x, target.y, target.width, target.height);
 
+  // `null` means no cells are on screen, so there are no transparent tiles to draw.
+  if (visible === null) return;
   const tiled = visible ? intersectRect(placed, visible) : placed;
   if (!tiled) return;
   ctx.fillStyle = FLOATING_TRANSPARENT_TILE;
