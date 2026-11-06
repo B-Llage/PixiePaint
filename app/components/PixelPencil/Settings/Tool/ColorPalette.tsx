@@ -1,4 +1,5 @@
 import { RefObject, useMemo } from "react";
+import { checkerboardStyle } from "../../checkerboard";
 import { PixelValue } from "../../PixelPencilTypes";
 
 interface PaletteProps {
@@ -19,12 +20,7 @@ export function ColorPalette({ paletteColors, setActiveColor, drawValueRef }: Pa
                         aria-label={`Use color ${color}`}
                         className="flex h-7 w-7 items-center justify-center rounded-full border border-zinc-300 transition-all hover:scale-105 focus:outline-none focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:border-zinc-700 dark:focus-visible:ring-white dark:focus-visible:ring-offset-black"
                         style={{
-                            backgroundColor: isTransparent ? "transparent" : color,
-                            backgroundImage: isTransparent
-                                ? "linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db), linear-gradient(45deg, #d1d5db 25%, transparent 25%, transparent 75%, #d1d5db 75%, #d1d5db)"
-                                : undefined,
-                            backgroundSize: isTransparent ? "8px 8px" : undefined,
-                            backgroundPosition: isTransparent ? "0 0, 4px 4px" : undefined,
+                            ...(isTransparent ? { backgroundColor: "transparent", ...checkerboardStyle(8) } : { backgroundColor: color }),
                         }}
                         onClick={() => {
                             setActiveColor(color);

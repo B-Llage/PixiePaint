@@ -1,10 +1,7 @@
-import { BrushShapeSelector } from "./Settings/Tool/BrushShapeSelector";
 import { BrushSizeSelector } from "./Settings/Tool/BrushSizeSelector";
-import { ShapeSelector } from "./Settings/Tool/ShapeSelector";
-import { ZoomModeSelector } from "./Settings/Tool/ZoomModeSelector";
-import { BRUSH_SHAPES, SHAPE_TYPES } from "./PixelPencil.constants";
-import { PaintTool, ShapeKind, BrushShape } from "./PixelPencilTypes";
-import { ZoomMode } from "./hooks/useZoomControls";
+import { PillOptionGroup } from "./Settings/Tool/PillOptionGroup";
+import { BRUSH_SHAPES, SHAPE_TYPES, ZOOM_MODE_OPTIONS } from "./PixelPencil.constants";
+import { PaintTool, ShapeKind, BrushShape, ZoomMode } from "./PixelPencilTypes";
 
 interface ToolSettingsPanelProps {
   currentTool: PaintTool;
@@ -54,24 +51,20 @@ export function ToolSettingsPanel({
         )}
 
         {currentTool.settings.brushShape && (
-          <BrushShapeSelector
+          <PillOptionGroup
+            label="Brush Shape"
             options={BRUSH_SHAPES}
             value={brushShape}
-            onChange={(value) => {
-              const newShape = typeof value === "function" ? value(brushShape) : value;
-              onBrushShapeChange(newShape);
-            }}
+            onChange={onBrushShapeChange}
           />
         )}
 
         {currentTool.settings.shapeType && (
-          <ShapeSelector
+          <PillOptionGroup
+            label="Shape"
             options={SHAPE_TYPES}
             value={shapeType}
-            onChange={(value) => {
-              const newShape = typeof value === "function" ? value(shapeType) : value;
-              onShapeTypeChange(newShape);
-            }}
+            onChange={onShapeTypeChange}
           />
         )}
 
@@ -88,7 +81,12 @@ export function ToolSettingsPanel({
         )}
 
         {currentTool.settings.zoomMode && (
-          <ZoomModeSelector value={zoomMode} onChange={onZoomModeChange} />
+          <PillOptionGroup
+            label="Zoom Mode"
+            options={ZOOM_MODE_OPTIONS}
+            value={zoomMode}
+            onChange={onZoomModeChange}
+          />
         )}
 
         {currentTool.settings.autoPickLayer && (

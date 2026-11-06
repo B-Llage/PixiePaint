@@ -6,12 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PixelPencilSettingsProvider } from "./context/PixelPencilSettingsContext";
 import { getPanBounds } from "./canvas-pan";
 import { PixelPencil } from "./PixelPencil";
+import { MagnifierTool, TOOLS } from "./PixelPencilTools";
 import type { PixelValue } from "./PixelPencilTypes";
 
 interface GridHarnessProps {
   displayCellSize: number;
   gridHeight: number;
+  toolCursorIcon: string;
+  toolCursorHotspot: { x: number; y: number };
+  useToolAsMousePointer: boolean;
   pixels: PixelValue[];
+  brushPreview: Set<number> | null;
   brushSizePreview: Set<number> | null;
   selectionOverlay: { rect: { x: number; y: number; width: number; height: number } } | null;
   gridRef: MutableRefObject<HTMLCanvasElement | null>;
@@ -64,12 +69,14 @@ vi.mock("./PixelGrid", () => ({
         <canvas ref={(node) => { props.gridRef.current = node; }} />
         <output data-testid="first-two-pixels">{JSON.stringify(props.pixels.slice(0, 2))}</output>
         <output data-testid="painted-cells">{JSON.stringify(props.pixels.flatMap((value, index) => value === null ? [] : [index]))}</output>
+        <output data-testid="brush-preview">{JSON.stringify([...(props.brushPreview ?? [])])}</output>
         <output data-testid="brush-size-preview">{JSON.stringify([...(props.brushSizePreview ?? [])])}</output>
         <output data-testid="selection-rect">{JSON.stringify(props.selectionOverlay?.rect ?? null)}</output>
         <output data-testid="canvas-scroll">{JSON.stringify(props.canvasScroll)}</output>
         <output data-testid="canvas-height">{props.gridHeight * props.displayCellSize}</output>
         <output data-testid="cell-size">{props.displayCellSize}</output>
         <output data-testid="grid-width">{props.pixels.length / props.gridHeight}</output>
+        <output data-testid="tool-cursor">{JSON.stringify({ icon: props.toolCursorIcon, hotspot: props.toolCursorHotspot, enabled: props.useToolAsMousePointer })}</output>
         <button onClick={() => props.onWheelZoom("in", 1, { x: 73.25, y: 91.5 })}>Zoom wheel in</button>
         <button onClick={() => props.onWheelZoom("out", 1, { x: 73.25, y: 91.5 })}>Zoom wheel out</button>
         <button onClick={() => props.onWheelZoom("in", 4, { x: 73.25, y: 91.5 })}>Zoom wheel four steps</button>
@@ -96,6 +103,7 @@ vi.mock("./PixelGrid", () => ({
         <button onClick={() => props.handlePointerUp(pointerAt(6, 0, 4))}>Finish center stroke</button>
         <button onClick={() => props.handlePointerDown(pointerAt(0), 0)}>Start move</button>
         <button onClick={() => props.handlePointerMove(pointerAt(1))}>Drag one cell</button>
+        <button onClick={() => props.handlePointerMove(pointerAt(4, 0, 4))}>Hover center cell</button>
         <button onClick={() => props.handlePointerUp(pointerAt(1))}>Finish move</button>
         <button onClick={() => props.handlePointerCancel(pointerAt(1))}>Cancel move</button>
       </div>
@@ -125,6 +133,10 @@ function firstTwoPixels(): PixelValue[] {
 
 function paintedCells(): number[] {
   return JSON.parse(screen.getByTestId("painted-cells").textContent ?? "[]") as number[];
+}
+
+function brushPreview(): number[] {
+  return JSON.parse(screen.getByTestId("brush-preview").textContent ?? "[]") as number[];
 }
 
 function brushSizePreview(): number[] {
@@ -177,6 +189,21 @@ describe("PixelPencil move tool", () => {
 });
 
 describe("PixelPencil viewport", () => {
+  it("updates the canvas pointer settings when the setting or selected tool changes", () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+
+    const cursor = () => JSON.parse(screen.getByTestId("tool-cursor").textContent ?? "{}") as Record<string, unknown>;
+    expect(cursor()).toEqual({ icon: "/icons/cursors/Pencil.png", hotspot: { x: 14, y: 28 }, enabled: false });
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Use Tool as Mouse Pointer/i }));
+    expect(cursor()).toEqual({ icon: "/icons/cursors/Pencil.png", hotspot: { x: 14, y: 28 }, enabled: true });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Eraser" }));
+    expect(cursor()).toEqual({ icon: "/icons/cursors/Eraser.png", hotspot: { x: 14, y: 2 }, enabled: true });
+  });
+
   it("shows the common drawing tools first and keeps tool selection working", () => {
     render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
 
@@ -541,6 +568,19 @@ describe("PixelPencil controls", () => {
     expect(paintedCells()).not.toContain(4 * 32 + 4);
   });
 
+  it("shows the same single-cell hover preview for pencil, line, and shape", () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hover center cell" }));
+    expect(brushPreview()).toEqual([4 * 32 + 4]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Line" }));
+    expect(brushPreview()).toEqual([4 * 32 + 4]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Shape" }));
+    expect(brushPreview()).toEqual([4 * 32 + 4]);
+  });
+
   it("uses typed sizes for line and shape tools", async () => {
     render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
     fireEvent.click(screen.getByRole("button", { name: "Line" }));
@@ -610,6 +650,21 @@ describe("PixelPencil controls", () => {
     fireEvent.click(screen.getByRole("button", { name: "Magnifier" }));
     expect(within(toolSettings).getByRole("button", { name: "Zoom Out" })).not.toBeNull();
     expect(screen.getByRole("region", { name: "Tool settings" })).toBe(toolSettings);
+  });
+
+  it("lists every tool's real hotkey in the Hotkeys dialog", () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Hotkeys" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Hotkeys" });
+    for (const tool of TOOLS) {
+      const row = within(dialog).getByText(tool.label).closest("li");
+      expect(row?.textContent).toContain(tool.hotkey.toUpperCase());
+    }
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+
+    fireEvent.keyDown(window, { key: MagnifierTool.hotkey });
+    expect(within(screen.getByRole("region", { name: "Tool settings" })).getByText("Zoom Mode")).not.toBeNull();
   });
 
   it("shows the prepared release version and patch notes in the changelog", () => {

@@ -12,6 +12,7 @@ function SettingsProbe() {
         {JSON.stringify({
           previewToolEffects: settings.previewToolEffects,
           dimStrokePreview: settings.dimStrokePreview,
+          useToolAsMousePointer: settings.useToolAsMousePointer,
           canvasPixelSize: settings.canvasPixelSize,
           gridWidth: settings.gridWidth,
           gridHeight: settings.gridHeight,
@@ -32,8 +33,18 @@ function readSettings() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("PixelPencilSettingsProvider", () => {
+  it("keeps the usual pointer by default and persists the tool pointer toggle", async () => {
+    render(<PixelPencilSettingsProvider><SettingsModal onClose={vi.fn()} /></PixelPencilSettingsProvider>);
+
+    const checkbox = screen.getByRole("checkbox", { name: /Use Tool as Mouse Pointer/i }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    fireEvent.click(checkbox);
+    expect(checkbox.checked).toBe(true);
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem("pixel-pencil-settings") ?? "{}").useToolAsMousePointer).toBe(true));
+  });
+
   it("offers the old dimmed stroke appearance as an opt-in setting", async () => {
-    render(<PixelPencilSettingsProvider><SettingsModal handleCloseSettingsDialog={vi.fn()} /></PixelPencilSettingsProvider>);
+    render(<PixelPencilSettingsProvider><SettingsModal onClose={vi.fn()} /></PixelPencilSettingsProvider>);
 
     const checkbox = screen.getByRole("checkbox", { name: /Dim Stroke Preview/i }) as HTMLInputElement;
     expect(checkbox.checked).toBe(false);
@@ -46,6 +57,7 @@ describe("PixelPencilSettingsProvider", () => {
     const saved = {
       previewToolEffects: false,
       dimStrokePreview: true,
+      useToolAsMousePointer: true,
       canvasPixelSize: 19,
       gridWidth: 64,
       gridHeight: 16,
@@ -70,6 +82,7 @@ describe("PixelPencilSettingsProvider", () => {
       checkerSize: 0,
       showPixelGrid: "yes",
       dimStrokePreview: "yes",
+      useToolAsMousePointer: "yes",
     }));
 
     render(<PixelPencilSettingsProvider><SettingsProbe /></PixelPencilSettingsProvider>);
@@ -80,6 +93,7 @@ describe("PixelPencilSettingsProvider", () => {
       checkerSize: 8,
       showPixelGrid: false,
       dimStrokePreview: false,
+      useToolAsMousePointer: false,
     }));
     fireEvent.click(screen.getByRole("button", { name: "Set width" }));
     await waitFor(() => expect(readSettings().gridWidth).toBe(64));

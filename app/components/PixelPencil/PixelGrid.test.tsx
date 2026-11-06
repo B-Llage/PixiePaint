@@ -4,7 +4,8 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PixelGrid } from "./PixelGrid";
-import type { PixelValue } from "./PixelPencilTypes";
+import { BucketTool, ColorPickerTool, EraserTool, LineTool, MagnifierTool, MoveTool, PencilTool, RectSelectionTool, ShapeTool } from "./PixelPencilTools";
+import type { PaintTool, PixelValue } from "./PixelPencilTypes";
 import { clampPan, getPanBounds, includePanOffset } from "./canvas-pan";
 
 const pointerDown = vi.fn();
@@ -15,7 +16,7 @@ const backgroundDown = vi.fn();
 const wheelZoom = vi.fn();
 const viewportResize = vi.fn();
 
-function GridHarness({ width = 4, height = 4, viewportSize = 100, initialScroll = { x: 0, y: 0 }, brushSizePreview = null, pathPreview = null, brushPreview = null, bucketPreview = null, activeColor = "#ff0000", paintedPixel = null, dimStrokePreview = false, tool = "pencil" }: { width?: number; height?: number; viewportSize?: number; initialScroll?: { x: number; y: number }; brushSizePreview?: Set<number> | null; pathPreview?: Set<number> | null; brushPreview?: Set<number> | null; bucketPreview?: Set<number> | null; activeColor?: string; paintedPixel?: PixelValue; dimStrokePreview?: boolean; tool?: string }) {
+function GridHarness({ width = 4, height = 4, viewportSize = 100, initialScroll = { x: 0, y: 0 }, brushSizePreview = null, pathPreview = null, brushPreview = null, bucketPreview = null, activeColor = "#ff0000", paintedPixel = null, dimStrokePreview = false, tool = "pencil", cursorTool = PencilTool, useToolAsMousePointer = false }: { width?: number; height?: number; viewportSize?: number; initialScroll?: { x: number; y: number }; brushSizePreview?: Set<number> | null; pathPreview?: Set<number> | null; brushPreview?: Set<number> | null; bucketPreview?: Set<number> | null; activeColor?: string; paintedPixel?: PixelValue; dimStrokePreview?: boolean; tool?: string; cursorTool?: PaintTool; useToolAsMousePointer?: boolean }) {
   const [scroll, setScroll] = useState(initialScroll);
   const gridRef = useRef<HTMLCanvasElement | null>(null);
   const gridWrapperRef = useRef<HTMLDivElement | null>(null);
@@ -55,6 +56,9 @@ function GridHarness({ width = 4, height = 4, viewportSize = 100, initialScroll 
         drawValueRef={drawValueRef}
         drawValueVersion={0}
         tool={tool}
+        toolCursorIcon={cursorTool.cursorIcon}
+        toolCursorHotspot={cursorTool.cursorHotspot}
+        useToolAsMousePointer={useToolAsMousePointer}
         wrapperMaxWidth={viewportSize}
         wrapperMaxHeight={viewportSize}
         canvasScroll={scroll}
@@ -136,6 +140,39 @@ afterEach(() => {
 });
 
 describe("PixelGrid panning", () => {
+  it("uses the selected tool icon only on the canvas while enabled", () => {
+    const { container, rerender } = render(<GridHarness />);
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    const wrapper = canvas.parentElement as HTMLDivElement;
+
+    expect(canvas.style.cursor).toBe("");
+    expect(wrapper.style.cursor).toBe("");
+
+    rerender(<GridHarness useToolAsMousePointer />);
+    expect(canvas.style.cursor).toBe('url("/icons/cursors/Pencil.png") 14 28, auto');
+    expect(wrapper.style.cursor).toBe("");
+
+    rerender(<GridHarness cursorTool={EraserTool} useToolAsMousePointer />);
+    expect(canvas.style.cursor).toBe('url("/icons/cursors/Eraser.png") 14 2, auto');
+
+    rerender(<GridHarness cursorTool={EraserTool} />);
+    expect(canvas.style.cursor).toBe("");
+  });
+
+  it.each([
+    [BucketTool, 2, 28],
+    [ColorPickerTool, 2, 26],
+    [LineTool, 2, 28],
+    [RectSelectionTool, 0, 0],
+    [ShapeTool, 0, 0],
+    [MoveTool, 0, 0],
+    [MagnifierTool, 0, 0],
+  ])("places the %s pointer click point at its working end", (cursorTool, x, y) => {
+    const { container } = render(<GridHarness cursorTool={cursorTool} useToolAsMousePointer />);
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    expect(canvas.style.cursor).toBe(`url("${cursorTool.cursorIcon}") ${x} ${y}, auto`);
+  });
+
   it.each(["pencil", "bucket"])("shows the selected color in the %s hover preview unless dimming is enabled", (tool) => {
     const draws: { color: string; alpha: number; x: number; y: number }[] = [];
     const context = {

@@ -6,15 +6,15 @@ import { createPortal } from "react-dom";
 
 import type { PaintTool } from "./PixelPencilTypes";
 
-interface ToolboxProps {
-  tools: readonly PaintTool[];
-  selectedToolId: PaintTool["id"];
-  onSelect: (toolId: PaintTool["id"]) => void;
+interface ToolboxProps<T extends PaintTool> {
+  tools: readonly T[];
+  selectedToolId: T["id"];
+  onSelect: (toolId: T["id"]) => void;
 }
 
-export function Toolbox({ tools, selectedToolId, onSelect }: ToolboxProps) {
+export function Toolbox<T extends PaintTool>({ tools, selectedToolId, onSelect }: ToolboxProps<T>) {
   const [tooltip, setTooltip] = useState<{
-    id: PaintTool["id"];
+    id: T["id"];
     label: string;
     left: number;
     top: number;

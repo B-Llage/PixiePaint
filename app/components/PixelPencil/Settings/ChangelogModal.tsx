@@ -1,7 +1,7 @@
 "use client";
 
 interface ChangelogModalProps {
-  handleCloseChangelogDialog: () => void;
+  onClose: () => void;
 }
 
 const CHANGELOG_ENTRIES = [
@@ -50,13 +50,11 @@ const CHANGELOG_ENTRIES = [
   },
 ];
 
-export function ChangelogModal({
-  handleCloseChangelogDialog,
-}: ChangelogModalProps) {
+export function ChangelogModal({ onClose }: ChangelogModalProps) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={handleCloseChangelogDialog}
+      onClick={onClose}
     >
       <div
         role="dialog"
@@ -93,7 +91,7 @@ export function ChangelogModal({
         <div className="mt-6 flex justify-end">
           <button
             type="button"
-            onClick={handleCloseChangelogDialog}
+            onClick={onClose}
             className="rounded-full border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-800 transition-colors hover:bg-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800 dark:focus-visible:ring-white dark:focus-visible:ring-offset-black"
           >
             Close
