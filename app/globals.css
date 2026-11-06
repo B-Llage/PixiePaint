@@ -1,8 +1,17 @@
 @import "tailwindcss";
 
+/*
+ * Pixie Paint is always dark. The editor shell hard-codes dark colors, so the
+ * `dark:` variant must follow the `dark` class on <html> (set in layout.tsx)
+ * rather than the system `prefers-color-scheme`, or light-scheme users get
+ * light cards with inherited light text.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0a0a0a;
+  --foreground: #ededed;
+  color-scheme: dark;
 }
 
 @theme inline {
@@ -10,13 +19,6 @@
   --color-foreground: var(--foreground);
   --font-sans: Arial, Helvetica, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {

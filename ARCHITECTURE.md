@@ -2,7 +2,7 @@
 
 ## Runtime and entry point
 
-This is a client-side pixel art editor built with Next.js App Router, React, TypeScript, and Tailwind CSS. `app/page.tsx` mounts `PixelPencil` inside `PixelPencilSettingsProvider`. `app/layout.tsx` supplies metadata, global CSS, and analytics. The stylesheet uses system fonts, so production builds do not fetch font assets. There is no application backend or server persistence.
+This is a client-side pixel art editor built with Next.js App Router, React, TypeScript, and Tailwind CSS. `app/page.tsx` mounts `PixelPencil` inside `PixelPencilSettingsProvider`. `app/layout.tsx` supplies metadata, global CSS, and analytics. The stylesheet uses system fonts, so production builds do not fetch font assets. The editor is always dark: `app/layout.tsx` puts a `dark` class on `<html>` and `app/globals.css` redefines Tailwind's `dark:` variant to follow that class instead of `prefers-color-scheme`, so the `light`/`dark:` class pairs in components never split by system scheme. There is no application backend or server persistence.
 
 ## Editor state and data flow
 
