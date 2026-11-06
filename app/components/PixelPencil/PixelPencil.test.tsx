@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Dispatch, MutableRefObject, PointerEvent as ReactPointerEvent, SetStateAction } from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PixelPencilSettingsProvider } from "./context/PixelPencilSettingsContext";
@@ -21,6 +21,7 @@ interface GridHarnessProps {
   useToolAsMousePointer: boolean;
   composite: PixelBuffer;
   getOverlayFrame: () => OverlayFrame;
+  redraw: { subscribe(listener: () => void): () => void };
   selectionOverlay: { rect: { x: number; y: number; width: number; height: number } } | null;
   gridRef: MutableRefObject<HTMLCanvasElement | null>;
   gridWrapperRef: MutableRefObject<HTMLDivElement | null>;
@@ -73,6 +74,9 @@ vi.mock("./PixelGrid", () => ({
     }, [onViewportResize]);
     // Overlay masks live in refs read at draw time, so tests sample them on demand.
     const [overlay, setOverlay] = useState<{ brush: number[]; brushSizeShadow: number[]; bucketSize: number }>({ brush: [], brushSizeShadow: [], bucketSize: 0 });
+    const { subscribe } = props.redraw;
+    const [redrawCount, setRedrawCount] = useState(0);
+    useEffect(() => subscribe(() => setRedrawCount((count) => count + 1)), [subscribe]);
     const compositeWidth = props.composite.width;
     const compositeValues = Array.from(props.composite.data, (value) => unpackColor(value));
 
@@ -117,6 +121,15 @@ vi.mock("./PixelGrid", () => ({
             bucketSize: maskCells(frame.bucket, compositeWidth).length,
           });
         }}>Read overlay</button>
+        <output data-testid="redraw-count">{redrawCount}</output>
+        <button onClick={() => {
+          props.handlePointerMove(pointerAt(6, 0, 4));
+          props.handlePointerMove(pointerAt(4, 0, 4));
+        }}>Drag out and back</button>
+        <button onClick={() => {
+          props.handlePointerMove(pointerAt(8, 0, 4));
+          props.handlePointerMove(pointerAt(4, 0, 4));
+        }}>Drag further out and back</button>
         <output data-testid="bucket-preview">{JSON.stringify(overlay.bucketSize)}</output>
         <output data-testid="selection-rect">{JSON.stringify(props.selectionOverlay?.rect ?? null)}</output>
         <output data-testid="canvas-scroll">{JSON.stringify(props.canvasScroll)}</output>
@@ -582,6 +595,44 @@ describe("PixelPencil viewport", () => {
     fireEvent.click(screen.getByRole("button", { name: "Paint at shifted origin" }));
     await waitFor(() => expect(firstTwoPixels()[0]).not.toBeNull());
     expect(firstTwoPixels()[1]).toBeNull();
+  });
+});
+
+describe("PixelPencil stroke preview redraws", () => {
+  it("requests a redraw each time a stroke grows its preview mask in place", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    const click = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+    const redraws = () => Number(screen.getByTestId("redraw-count").textContent);
+    // Delivers queued frames, including ones requested while delivering (pointer
+    // samples are traced in a frame that then requests the redraw).
+    const runFrames = () => {
+      act(() => {
+        for (let pass = 0; pass < 4 && frames.length; pass += 1) {
+          for (const frame of frames.splice(0, frames.length)) frame(0);
+        }
+      });
+    };
+
+    click("Start center stroke");
+    runFrames();
+    const afterPress = redraws();
+    expect(afterPress).toBeGreaterThan(0);
+
+    // Each drag extends the stroke but ends on the pressed cell, so the hover cell
+    // does not change and only the in-place mask growth can request the redraw.
+    click("Drag out and back");
+    runFrames();
+    const afterFirstGrowth = redraws();
+    expect(afterFirstGrowth).toBeGreaterThan(afterPress);
+
+    click("Drag further out and back");
+    runFrames();
+    expect(redraws()).toBeGreaterThan(afterFirstGrowth);
   });
 });
 
