@@ -79,3 +79,28 @@ body {
   animation: pixelSelectionDashSolid 0.75s linear infinite;
 }
 
+
+/*
+ * Panel scrollers keep a permanent scrollbar gutter (overflow-y: scroll) so the
+ * panel never narrows when the list grows. Safari paints an empty native track
+ * in its light default even under color-scheme: dark, so the track is styled
+ * transparent and the thumb in the panel's own greys.
+ */
+.panel-scroll {
+  scrollbar-color: #52525b transparent;
+}
+
+.panel-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.panel-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.panel-scroll::-webkit-scrollbar-thumb {
+  background: #52525b;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}

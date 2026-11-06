@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { useEffect, useState } from "react";
 import type { Dispatch, MutableRefObject, PointerEvent as ReactPointerEvent, SetStateAction } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -1012,5 +1014,10 @@ describe("PixelPencil layers sidebar", () => {
     expect(scroller).not.toBeNull();
     expect(scroller?.className).toContain("overflow-y-scroll");
     expect(scroller?.className).not.toContain("overflow-y-auto");
+    // Safari paints an empty native track light; the panel styles its own transparent track.
+    expect(scroller?.className).toContain("panel-scroll");
+    const css = readFileSync(join(__dirname, "../../globals.css"), "utf8");
+    expect(css).toMatch(/\.panel-scroll::-webkit-scrollbar-track \{\s*background: transparent;/);
+    expect(css).toMatch(/\.panel-scroll \{\s*scrollbar-color: #52525b transparent;/);
   });
 });
