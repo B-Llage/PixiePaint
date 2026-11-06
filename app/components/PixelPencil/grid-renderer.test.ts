@@ -67,7 +67,7 @@ function createContextStub(options: { pattern?: boolean } = {}) {
     drawImage: (...args: unknown[]) => {
       calls.push({ name: "drawImage", args: [...args], fillStyle: context.imageSmoothingEnabled });
     },
-    createPattern: vi.fn(() => (options.pattern ? { kind: "pattern" } : null)),
+    createPattern: vi.fn((..._args: unknown[]) => (options.pattern ? { kind: "pattern" } : null)),
   };
   return context;
 }
@@ -234,9 +234,44 @@ describe("drawCheckerboard", () => {
     expect(fills).toHaveLength(2);
     expect(fills[0].fillStyle).toEqual({ kind: "pattern" });
     expect(callsNamed(context, "translate")[0].args).toEqual([30, 30]);
-    // One checker is one cell (10 device px): the pattern is scaled to it.
-    expect(callsNamed(context, "scale")[0].args).toEqual([10, 10]);
-    expect(fills[0].args).toEqual([0, 0, 4, 4]);
+    // One checker is one cell (10 device px): the tile is built at that size, so the pattern is never scaled.
+    expect(callsNamed(context, "scale")).toHaveLength(0);
+    expect(fills[0].args).toEqual([0, 0, 40, 40]);
+  });
+
+  it("builds the checker tile at device size and never scales the pattern", () => {
+    const context = createContextStub({ pattern: true });
+    const grid = { width: 8, height: 8 };
+    drawCheckerboard(asContext(context), grid, view({ displayCellSize: 10, scaleX: 2, scaleY: 2, originX: 6, originY: 8 }), { x: 0, y: 0, width: 8, height: 8 }, 2);
+
+    expect(context.createPattern).toHaveBeenCalledTimes(1);
+    const tile = context.createPattern.mock.calls[0][0] as unknown as HTMLCanvasElement;
+    expect(tile.width).toBe(80);
+    expect(tile.height).toBe(80);
+    expect(callsNamed(context, "scale")).toHaveLength(0);
+    expect(callsNamed(context, "translate")[0].args).toEqual([12, 16]);
+  });
+
+  it("rebuilds the tile when the checker size changes and reuses it otherwise", () => {
+    const context = createContextStub({ pattern: true });
+    const grid = { width: 4, height: 4 };
+    const visible = { x: 0, y: 0, width: 4, height: 4 };
+    drawCheckerboard(asContext(context), grid, view(), visible, 1);
+    drawCheckerboard(asContext(context), grid, view(), visible, 1);
+    expect(context.createPattern).toHaveBeenCalledTimes(1);
+    drawCheckerboard(asContext(context), grid, view({ displayCellSize: 12 }), visible, 1);
+    expect(context.createPattern).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses per-checker fills at fractional checker sizes", () => {
+    const context = createContextStub({ pattern: true });
+    drawCheckerboard(asContext(context), { width: 4, height: 4 }, view({ displayCellSize: 2.5 }), { x: 0, y: 0, width: 4, height: 4 }, 1);
+    expect(context.createPattern).not.toHaveBeenCalled();
+    expect(callsNamed(context, "scale")).toHaveLength(0);
+    const fills = callsNamed(context, "fillRect");
+    expect(fills).toHaveLength(16);
+    expect(fills[0].fillStyle).toBe(TRANSPARENT_LIGHT);
+    expect(fills[1].fillStyle).toBe(TRANSPARENT_DARK);
   });
 
   it("falls back to one fill per checker when patterns are unavailable", () => {

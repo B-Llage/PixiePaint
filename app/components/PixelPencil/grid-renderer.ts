@@ -119,31 +119,43 @@ function createCanvas(width: number, height: number): HTMLCanvasElement {
   return canvas;
 }
 
-// One 2x2 checker tile and its pattern per destination context; the pattern
-// is scaled to the checker size at draw time, so it never needs rebuilding.
-const checkerPatterns = new WeakMap<CanvasRenderingContext2D, CanvasPattern | null>();
+// Largest checker tile (per side, in device pixels) built as a pattern; bigger
+// checkers use per-checker fills, which are bounded by the visible area.
+const MAX_CHECKER_TILE = 2048;
 
-function checkerPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
-  if (checkerPatterns.has(ctx)) return checkerPatterns.get(ctx) ?? null;
-  const tile = createCanvas(2, 2);
+// The pattern and the device-pixel checker size it was built for, per context.
+// Patterns are never scaled (Safari interpolates scaled patterns), so the tile
+// is rebuilt once per zoom level rather than per frame.
+const checkerPatterns = new WeakMap<
+  CanvasRenderingContext2D,
+  { width: number; height: number; pattern: CanvasPattern | null }
+>();
+
+function checkerPattern(ctx: CanvasRenderingContext2D, width: number, height: number): CanvasPattern | null {
+  const cached = checkerPatterns.get(ctx);
+  if (cached && cached.width === width && cached.height === height) return cached.pattern;
+  const tile = createCanvas(2 * width, 2 * height);
   const tileContext = tile.getContext("2d");
   let pattern: CanvasPattern | null = null;
   if (tileContext) {
     tileContext.fillStyle = TRANSPARENT_LIGHT;
-    tileContext.fillRect(0, 0, 2, 2);
+    tileContext.fillRect(0, 0, 2 * width, 2 * height);
     tileContext.fillStyle = TRANSPARENT_DARK;
-    tileContext.fillRect(1, 0, 1, 1);
-    tileContext.fillRect(0, 1, 1, 1);
+    tileContext.fillRect(width, 0, width, height);
+    tileContext.fillRect(0, height, width, height);
     pattern = ctx.createPattern(tile, "repeat");
   }
-  checkerPatterns.set(ctx, pattern);
+  checkerPatterns.set(ctx, { width, height, pattern });
   return pattern;
 }
 
+const isWholePixels = (value: number) => value >= 1 && Math.abs(value - Math.round(value)) < 1e-6;
+
 /**
  * Fills the visible cells with the transparency checkerboard (`checkerSize`
- * cells per checker). Uses one pattern fill aligned to the artwork origin, or
- * one fill per checker when patterns are unavailable.
+ * cells per checker). Uses one unscaled pattern fill aligned to the artwork
+ * origin when a checker is a whole number of device pixels, and one fill per
+ * checker otherwise (fractional zoom, huge checkers, or no pattern support).
  */
 export function drawCheckerboard(
   ctx: CanvasRenderingContext2D,
@@ -155,24 +167,24 @@ export function drawCheckerboard(
   const size = Math.max(1, Math.floor(checkerSize));
   const area = rectToDevice(view, visible);
   if (area.width <= 0 || area.height <= 0) return;
-  const pattern = checkerPattern(ctx);
-  if (pattern) {
-    const origin = cellToDevice(view, 0, 0);
-    const checkerWidth = size * view.displayCellSize * view.scaleX;
-    const checkerHeight = size * view.displayCellSize * view.scaleY;
-    ctx.save();
-    ctx.imageSmoothingEnabled = false;
-    ctx.translate(origin.x, origin.y);
-    ctx.scale(checkerWidth, checkerHeight);
-    ctx.fillStyle = pattern;
-    ctx.fillRect(
-      (area.x - origin.x) / checkerWidth,
-      (area.y - origin.y) / checkerHeight,
-      area.width / checkerWidth,
-      area.height / checkerHeight,
-    );
-    ctx.restore();
-    return;
+  const checkerWidth = size * view.displayCellSize * view.scaleX;
+  const checkerHeight = size * view.displayCellSize * view.scaleY;
+  if (
+    isWholePixels(checkerWidth) &&
+    isWholePixels(checkerHeight) &&
+    2 * Math.round(checkerWidth) <= MAX_CHECKER_TILE &&
+    2 * Math.round(checkerHeight) <= MAX_CHECKER_TILE
+  ) {
+    const pattern = checkerPattern(ctx, Math.round(checkerWidth), Math.round(checkerHeight));
+    if (pattern) {
+      const origin = cellToDevice(view, 0, 0);
+      ctx.save();
+      ctx.translate(origin.x, origin.y);
+      ctx.fillStyle = pattern;
+      ctx.fillRect(area.x - origin.x, area.y - origin.y, area.width, area.height);
+      ctx.restore();
+      return;
+    }
   }
   const firstX = Math.floor(visible.x / size);
   const firstY = Math.floor(visible.y / size);
