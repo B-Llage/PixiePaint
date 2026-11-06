@@ -47,6 +47,7 @@ import {
 import { getPanBounds, includePanOffset } from "./canvas-pan";
 import { checkerboardStyle } from "./checkerboard";
 import { useEscapeKey } from "./hooks/useEscapeKey";
+import { useStateWithRef } from "./hooks/useStateWithRef";
 import packageJson from "../../../package.json";
 
 const PALETTE_THEMES: readonly PaletteTheme[] = PixelPencilPalettes;
@@ -120,7 +121,7 @@ export function PixelPencil() {
   ) {
     initialLayerPixelsRef.current = createEmptyPixelArray();
   }
-  const [layers, setLayers] = useState<Layer[]>(() => [
+  const [layers, setLayers, layersRef] = useStateWithRef<Layer[]>(() => [
     {
       id: initialLayerIdRef.current as string,
       name: "Layer 1",
@@ -131,10 +132,11 @@ export function PixelPencil() {
   const [activeLayerId, setActiveLayerId] = useState<string>(
     initialLayerIdRef.current as string,
   );
-  const [activeLayerPixels, setActiveLayerPixelsState] = useState<PixelValue[]>(
+  const [activeLayerPixels, setActiveLayerPixelsState, activeLayerPixelsRef] =
+    useStateWithRef<PixelValue[]>(
     initialLayerPixelsRef.current as PixelValue[],
   );
-  const [compositePixels, setCompositePixels] = useState<PixelValue[]>(
+  const [compositePixels, setCompositePixels, compositePixelsRef] = useStateWithRef<PixelValue[]>(
     () => createEmptyPixelArray(),
   );
   const [layerPreviews, setLayerPreviews] = useState<Record<string, string>>({});
@@ -177,9 +179,6 @@ export function PixelPencil() {
   const lastPaintedIndexRef = useRef<number | null>(null);
   const strokeWorldPointsRef = useRef<{ x: number; y: number }[] | null>(null);
   const strokeAppliedCellsRef = useRef<Set<number> | null>(null);
-  const activeLayerPixelsRef = useRef(activeLayerPixels);
-  const compositePixelsRef = useRef(compositePixels);
-  const layersRef = useRef(layers);
   const undoStackRef = useRef<LayerSnapshot[]>([]);
   const redoStackRef = useRef<LayerSnapshot[]>([]);
   const actionInProgressRef = useRef(false);
@@ -209,36 +208,16 @@ export function PixelPencil() {
   const [canvasScroll, setCanvasScroll] = useState({ x: 0, y: 0 });
   const [zoomPanException, setZoomPanException] = useState(false);
   const [canvasViewport, setCanvasViewport] = useState({ width: 0, height: 0 });
-  const selectionRef = useRef<SelectionState | null>(null);
-  const [selection, setSelectionState] = useState<SelectionState | null>(null);
-  const setSelection = useCallback(
-    (
-      value:
-        | SelectionState
-        | null
-        | ((previous: SelectionState | null) => SelectionState | null),
-    ) => {
-      setSelectionState((previous) => {
-        const next =
-          typeof value === "function"
-            ? (value as (prev: SelectionState | null) => SelectionState | null)(
-              previous,
-            )
-            : value;
-        selectionRef.current = next;
-        return next;
-      });
-    },
-    [],
-  );
+  const [selection, setSelection, selectionRef] = useStateWithRef<SelectionState | null>(null);
   const [selectionPreviewRect, setSelectionPreviewRect] = useState<SelectionRect | null>(null);
   const prevDimensionsRef = useRef({ width: gridWidth, height: gridHeight });
   const [isMobile, setIsMobile] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<"layers" | "palette" | null>(null);
   const mobileLayersButtonRef = useRef<HTMLButtonElement | null>(null);
   const mobilePaletteButtonRef = useRef<HTMLButtonElement | null>(null);
-  // Unlike React's setState, this runs a functional `next` synchronously and
-  // writes through to the refs, so callers may read flags set inside the updater.
+  // Writes the active layer's pixels and mirrors them into `layers`. Like the
+  // hook setters, a functional `next` runs synchronously against the latest
+  // pixels, so callers may read flags set inside the updater.
   const setActiveLayerPixels = useCallback(
     (
       next:
@@ -258,8 +237,6 @@ export function PixelPencil() {
       ) {
         return;
       }
-
-      activeLayerPixelsRef.current = resolvedPixels;
       setActiveLayerPixelsState(resolvedPixels);
 
       const currentLayers = layersRef.current;
@@ -278,10 +255,9 @@ export function PixelPencil() {
         ...targetLayer,
         pixels: resolvedPixels,
       };
-      layersRef.current = updatedLayers;
       setLayers(updatedLayers);
     },
-    [activeLayerId],
+    [activeLayerId, activeLayerPixelsRef, layersRef, setActiveLayerPixelsState, setLayers],
   );
   const currentPalette = useMemo(() => {
     const found = PALETTE_THEMES.find((theme) => theme.id === paletteThemeId);
@@ -379,7 +355,7 @@ export function PixelPencil() {
       }
       return result;
     },
-    [coordsToIndex, isInBounds],
+    [activeLayerPixelsRef, coordsToIndex, isInBounds],
   );
 
   const applySelectionToLayer = useCallback(
@@ -435,7 +411,7 @@ export function PixelPencil() {
     actionModifiedRef.current = false;
     actionInProgressRef.current = false;
     updateHistoryState();
-  }, [activeLayerId, totalCells, updateHistoryState]);
+  }, [activeLayerId, layersRef, selectionRef, totalCells, updateHistoryState]);
 
   const selectionCancelClickRef = useRef(false);
 
@@ -487,7 +463,7 @@ export function PixelPencil() {
     }
     selectionCancelClickRef.current = false;
     return true;
-  }, [applySelectionToLayer, clearSelectionState, finalizeAction, releaseSelectionPointerCapture]);
+  }, [applySelectionToLayer, clearSelectionState, finalizeAction, releaseSelectionPointerCapture, selectionRef]);
 
   const selectEntireCanvas = useCallback(() => {
     if (gridWidth <= 0 || gridHeight <= 0) {
@@ -551,7 +527,7 @@ export function PixelPencil() {
     }
     undoStack.push(snapshot);
     updateHistoryState();
-  }, [activeLayerId, totalCells, updateHistoryState]);
+  }, [activeLayerId, layersRef, selectionRef, totalCells, updateHistoryState]);
 
   const beginAction = useCallback(() => {
     if (actionInProgressRef.current) return;
@@ -567,11 +543,9 @@ export function PixelPencil() {
     if (index < 0) return;
     const nextLayers = [...layersRef.current];
     nextLayers[index] = { ...nextLayers[index], pixels };
-    layersRef.current = nextLayers;
     setLayers(nextLayers);
-    activeLayerPixelsRef.current = pixels;
     setActiveLayerPixelsState(pixels);
-  }, []);
+  }, [layersRef, setActiveLayerPixelsState, setLayers]);
 
   const finishMoveDrag = useCallback((pointerId: number, cancelled: boolean) => {
     const drag = moveDragRef.current;
@@ -594,7 +568,6 @@ export function PixelPencil() {
       if (drag.actionStarted) {
         setMoveLayerPixels(drag.layerId, drag.sourcePixels.slice());
         const restoredSelection = cloneSelection(drag.sourceSelection);
-        selectionRef.current = restoredSelection;
         setSelection(restoredSelection);
         undoStackRef.current = drag.previousUndo;
         redoStackRef.current = drag.previousRedo;
@@ -606,7 +579,6 @@ export function PixelPencil() {
         const originalLayer = layersRef.current.find((layer) => layer.id === drag.originalActiveLayerId);
         if (originalLayer) {
           setActiveLayerId(originalLayer.id);
-          activeLayerPixelsRef.current = originalLayer.pixels;
           setActiveLayerPixelsState(originalLayer.pixels);
         }
       }
@@ -614,7 +586,7 @@ export function PixelPencil() {
       finalizeAction();
     }
     return true;
-  }, [finalizeAction, setMoveLayerPixels, setSelection, updateHistoryState]);
+  }, [finalizeAction, layersRef, selectionRef, setActiveLayerPixelsState, setMoveLayerPixels, setSelection, updateHistoryState]);
 
   const deleteSelection = useCallback(() => {
     const current = selectionRef.current;
@@ -628,7 +600,7 @@ export function PixelPencil() {
       finalizeAction();
     }
     clearSelectionState();
-  }, [applySelectionToLayer, beginAction, clearSelectionState, finalizeAction]);
+  }, [applySelectionToLayer, beginAction, clearSelectionState, finalizeAction, selectionRef]);
 
   const paletteColors = useMemo(
     () => [...currentPalette.colors, "transparent"] as PaletteColor[],
@@ -833,14 +805,6 @@ export function PixelPencil() {
   }, [setCanvasScrollLimited]);
 
   useEffect(() => {
-    activeLayerPixelsRef.current = activeLayerPixels;
-  }, [activeLayerPixels]);
-
-  useEffect(() => {
-    layersRef.current = layers;
-  }, [layers]);
-
-  useEffect(() => {
     const currentLayer = layers.find((layer) => layer.id === activeLayerId);
     if (!currentLayer) return;
     const currentPixels = activeLayerPixelsRef.current;
@@ -850,16 +814,14 @@ export function PixelPencil() {
       !arePixelsEqual(currentPixels, currentLayer.pixels)
     ) {
       const cloned = currentLayer.pixels.slice();
-      activeLayerPixelsRef.current = cloned;
       setActiveLayerPixelsState(cloned);
     }
-  }, [activeLayerId, layers]);
+  }, [activeLayerId, activeLayerPixelsRef, layers, setActiveLayerPixelsState]);
 
   useEffect(() => {
     const composed = composeLayers(layers, totalCells);
-    compositePixelsRef.current = composed;
     setCompositePixels(composed);
-  }, [layers, totalCells]);
+  }, [layers, setCompositePixels, totalCells]);
 
   useEffect(() => {
     const prev = prevDimensionsRef.current;
@@ -885,13 +847,11 @@ export function PixelPencil() {
           pixels: nextPixels,
         };
       });
-      layersRef.current = nextLayers;
       const activeLayer = nextLayers.find(
         (layer) => layer.id === activeLayerId,
       );
       if (activeLayer) {
         const cloned = activeLayer.pixels.slice();
-        activeLayerPixelsRef.current = cloned;
         setActiveLayerPixelsState(cloned);
       }
       return nextLayers;
@@ -909,9 +869,11 @@ export function PixelPencil() {
     activeLayerId,
     gridHeight,
     gridWidth,
+    setActiveLayerPixelsState,
     setCanRedo,
     setCanUndo,
     setHoverIndexIfChanged,
+    setLayers,
     totalCells,
   ]);
 
@@ -994,7 +956,6 @@ export function PixelPencil() {
   const applySnapshot = useCallback(
     (snapshot: LayerSnapshot) => {
       const restoredLayers = cloneLayers(snapshot.layers, totalCells);
-      layersRef.current = restoredLayers;
       setLayers(restoredLayers);
       const nextActiveId = restoredLayers.some(
         (layer) => layer.id === snapshot.activeLayerId,
@@ -1009,7 +970,6 @@ export function PixelPencil() {
       );
       if (targetLayer) {
         const cloned = targetLayer.pixels.slice();
-        activeLayerPixelsRef.current = cloned;
         setActiveLayerPixelsState(cloned);
       }
       setSelection(cloneSelection(snapshot.selection));
@@ -1024,6 +984,7 @@ export function PixelPencil() {
     [
       releaseSelectionPointerCapture,
       setActiveLayerPixelsState,
+      setLayers,
       setSelection,
       setSelectionPreviewRect,
       totalCells,
@@ -1053,6 +1014,8 @@ export function PixelPencil() {
   }, [
     activeLayerId,
     applySnapshot,
+    layersRef,
+    selectionRef,
     setHoverIndexIfChanged,
     totalCells,
     updateHistoryState,
@@ -1079,7 +1042,7 @@ export function PixelPencil() {
     actionModifiedRef.current = false;
     actionInProgressRef.current = false;
     updateHistoryState();
-  }, [activeLayerId, applySnapshot, setHoverIndexIfChanged, totalCells, updateHistoryState]);
+  }, [activeLayerId, applySnapshot, layersRef, selectionRef, setHoverIndexIfChanged, totalCells, updateHistoryState]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1191,7 +1154,7 @@ export function PixelPencil() {
     };
     window.addEventListener("keydown", handleSelectionKeys);
     return () => window.removeEventListener("keydown", handleSelectionKeys);
-  }, [cancelSelection, deleteSelection, selectEntireCanvas]);
+  }, [cancelSelection, deleteSelection, selectEntireCanvas, selectionRef]);
 
   const computeBrushIndices = useCallback(
     (centerIndex: number) =>
@@ -1251,7 +1214,7 @@ export function PixelPencil() {
       actionModifiedRef.current = true;
       setActiveLayerPixels(next);
     },
-    [computeBrushIndices, setActiveLayerPixels],
+    [activeLayerPixelsRef, computeBrushIndices, setActiveLayerPixels],
   );
 
   const buildLinePreview = useCallback(
@@ -1327,7 +1290,7 @@ export function PixelPencil() {
       setActiveColor(pickedColor);
       setDrawValue(pickedColor);
     },
-    [setActiveColor, setDrawValue],
+    [compositePixelsRef, setActiveColor, setDrawValue],
   );
 
   const startStroke = useCallback(
@@ -1356,7 +1319,6 @@ export function PixelPencil() {
       visible: true,
     };
     const nextLayers = [...layersRef.current, newLayer];
-    layersRef.current = nextLayers;
     setLayers(nextLayers);
     setActiveLayerId(newLayer.id);
     setPathPreview(null);
@@ -1364,7 +1326,7 @@ export function PixelPencil() {
     actionModifiedRef.current = false;
     actionInProgressRef.current = false;
     updateHistoryState();
-  }, [recordSnapshot, setHoverIndexIfChanged, totalCells, updateHistoryState, setPathPreview]);
+  }, [layersRef, recordSnapshot, setHoverIndexIfChanged, setLayers, setPathPreview, totalCells, updateHistoryState]);
 
   const handleDeleteLayer = useCallback(
     (layerId: string) => {
@@ -1379,7 +1341,6 @@ export function PixelPencil() {
       redoStackRef.current = [];
       const nextLayers = currentLayers.filter((layer) => layer.id !== layerId);
       if (!nextLayers.length) return;
-      layersRef.current = nextLayers;
       let nextActiveId = activeLayerId;
       if (
         layerId === activeLayerId ||
@@ -1395,7 +1356,7 @@ export function PixelPencil() {
       actionInProgressRef.current = false;
       updateHistoryState();
     },
-    [activeLayerId, recordSnapshot, setHoverIndexIfChanged, setPathPreview, updateHistoryState],
+    [activeLayerId, layersRef, recordSnapshot, setHoverIndexIfChanged, setLayers, setPathPreview, updateHistoryState],
   );
 
   const handleRenameLayer = useCallback(
@@ -1410,11 +1371,10 @@ export function PixelPencil() {
       const nextLayers = currentLayers.map((item) =>
         item.id === layerId ? { ...item, name: trimmedName } : item,
       );
-      layersRef.current = nextLayers;
       setLayers(nextLayers);
       updateHistoryState();
     },
-    [recordSnapshot, updateHistoryState],
+    [layersRef, recordSnapshot, setLayers, updateHistoryState],
   );
 
   const handleToggleLayerVisibility = useCallback(
@@ -1427,13 +1387,12 @@ export function PixelPencil() {
       const nextLayers = layersRef.current.map((layer) =>
         layer.id === layerId ? { ...layer, visible: !layer.visible } : layer,
       );
-      layersRef.current = nextLayers;
       setLayers(nextLayers);
       actionModifiedRef.current = false;
       actionInProgressRef.current = false;
       updateHistoryState();
     },
-    [recordSnapshot, updateHistoryState],
+    [layersRef, recordSnapshot, setLayers, updateHistoryState],
   );
 
   const handleReorderLayers = useCallback(
@@ -1453,13 +1412,12 @@ export function PixelPencil() {
       const nextLayers = [...currentLayers];
       const [moved] = nextLayers.splice(fromIndex, 1);
       nextLayers.splice(toIndex, 0, moved);
-      layersRef.current = nextLayers;
       setLayers(nextLayers);
       actionModifiedRef.current = false;
       actionInProgressRef.current = false;
       updateHistoryState();
     },
-    [recordSnapshot, updateHistoryState],
+    [layersRef, recordSnapshot, setLayers, updateHistoryState],
   );
 
   const handleSelectLayer = useCallback(
@@ -1472,7 +1430,7 @@ export function PixelPencil() {
       setPathPreview(null);
       setHoverIndexIfChanged(null);
     },
-    [activeLayerId, setHoverIndexIfChanged],
+    [activeLayerId, layersRef, setHoverIndexIfChanged],
   );
 
   const traceWorldSegment = useCallback(
@@ -1885,9 +1843,8 @@ export function PixelPencil() {
         }
       }
     }
-    selectionRef.current = nextSelection;
     setSelection(nextSelection);
-  }, [captureSelectionPixels, gridHeight, gridWidth, resolvePointerFromClientPoint, setMoveLayerPixels, setSelection, totalCells, updateHistoryState]);
+  }, [captureSelectionPixels, gridHeight, gridWidth, layersRef, resolvePointerFromClientPoint, setMoveLayerPixels, setSelection, totalCells, updateHistoryState]);
 
   const handlePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>, index: number) => {
@@ -1925,7 +1882,6 @@ export function PixelPencil() {
         }
         if (targetLayer.id !== activeLayerId) {
           setActiveLayerId(targetLayer.id);
-          activeLayerPixelsRef.current = targetLayer.pixels;
           setActiveLayerPixelsState(targetLayer.pixels);
         }
         moveDragRef.current = {
@@ -2137,38 +2093,41 @@ export function PixelPencil() {
       }
     },
     [
-      applySelectionToLayer,
-      activeLayerId,
-      autoPickLayer,
-      buildPreviewFromAppliedCells,
       activeColor,
+      activeLayerId,
       applyBrush,
+      applySelectionToLayer,
+      autoPickLayer,
       beginAction,
       buildLinePreview,
+      buildPreviewFromAppliedCells,
       cancelSelection,
       clampCellX,
       clampCellY,
       clearSelectionState,
       computeLineIndices,
       computeShapeCells,
+      coordsToIndex,
       floodFill,
       gridWidth,
-      coordsToIndex,
       isInBounds,
       lastPointedIndex,
-      selectionContainsCell,
+      layersRef,
+      pickColorAtIndex,
       previewToolEffects,
       resolvePointerFromPointerEvent,
-      pickColorAtIndex,
-      setSelection,
-      setHoverIndexIfChanged,
+      selectionContainsCell,
+      selectionRef,
+      setActiveLayerPixelsState,
       setDrawValue,
+      setHoverIndexIfChanged,
+      setSelection,
       shapeFilled,
       shapeType,
       startStroke,
       tool,
-      zoomMode,
       zoomAtClientPoint,
+      zoomMode,
   ],
   );
 
@@ -2186,7 +2145,7 @@ export function PixelPencil() {
       selectionCancelClickRef.current = true;
       cancelSelection();
     },
-    [cancelSelection, tool],
+    [cancelSelection, selectionRef, tool],
   );
 
   const finalizeRectSelectionPointerUp = useCallback(
@@ -2338,6 +2297,7 @@ export function PixelPencil() {
       clampSelectionOffset,
       normalizeSelectionRect,
       resolvePointerFromClientPoint,
+      selectionRef,
       setPathPreview,
       setSelection,
       setSelectionPreviewRect,
@@ -2506,6 +2466,7 @@ export function PixelPencil() {
       finalize();
     },
     [
+      activeLayerPixelsRef,
       appendStrokePoint,
       applyLinePath,
       commitStrokeBuffer,
@@ -2740,13 +2701,11 @@ export function PixelPencil() {
         ...layer,
         pixels: new Array(totalCells).fill(null) as PixelValue[],
       }));
-      layersRef.current = clearedLayers;
       const activeLayer = clearedLayers.find(
         (layer) => layer.id === activeLayerId,
       );
       if (activeLayer) {
         const cloned = activeLayer.pixels.slice();
-        activeLayerPixelsRef.current = cloned;
         setActiveLayerPixelsState(cloned);
       }
       return clearedLayers;
@@ -2755,7 +2714,7 @@ export function PixelPencil() {
     actionModifiedRef.current = false;
     actionInProgressRef.current = false;
     updateHistoryState();
-  }, [activeLayerId, recordSnapshot, setActiveLayerPixelsState, setHoverIndexIfChanged, totalCells, updateHistoryState]);
+  }, [activeLayerId, compositePixelsRef, recordSnapshot, setActiveLayerPixelsState, setHoverIndexIfChanged, setLayers, totalCells, updateHistoryState]);
 
 
 
