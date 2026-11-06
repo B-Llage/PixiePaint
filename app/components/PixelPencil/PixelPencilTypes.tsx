@@ -26,3 +26,19 @@ export type PixelValue = PaletteColor | null;
 
 export type BrushShape = (typeof BRUSH_SHAPES)[number]["id"];
 export type ShapeKind = (typeof SHAPE_TYPES)[number]["id"];
+
+export type Layer = {
+  id: string;
+  name: string;
+  pixels: PixelValue[];
+  visible: boolean;
+};
+
+export type SelectionRect = { x: number; y: number; width: number; height: number };
+export type SelectionPixel = { relX: number; relY: number; color: PixelValue };
+export type SelectionState = {
+  rect: SelectionRect;
+  offset: { dx: number; dy: number };
+  pixels: SelectionPixel[];
+  isFloating: boolean;
+};
