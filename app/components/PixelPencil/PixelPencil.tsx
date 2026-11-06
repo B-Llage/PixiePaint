@@ -9,8 +9,6 @@ import {
   PaletteColor,
   PaletteTheme,
   PixelValue,
-  SelectionPixel,
-  SelectionRect,
   SelectionState,
   ShapeKind,
   ZoomMode,
@@ -48,6 +46,7 @@ import { useEscapeKey } from "./hooks/useEscapeKey";
 import { useStateWithRef } from "./hooks/useStateWithRef";
 import { useEditorHistory, type HistoryStacks, type LayerSnapshot } from "./hooks/useEditorHistory";
 import { useCanvasViewport } from "./hooks/useCanvasViewport";
+import { useSelectionGestures, useSelectionState } from "./hooks/useSelection";
 import packageJson from "../../../package.json";
 
 const PALETTE_THEMES: readonly PaletteTheme[] = PixelPencilPalettes;
@@ -173,22 +172,9 @@ export function PixelPencil() {
   const ignoredCanvasPointerIdRef = useRef<number | null>(null);
   const pointerQueueRef = useRef<{ x: number; y: number }[]>([]);
   const pointerRAFRef = useRef<number | null>(null);
-  const selectionDraftOriginRef = useRef<{ x: number; y: number } | null>(null);
-  const selectionMoveRef = useRef<
-    | {
-      pointer: { x: number; y: number };
-      startOffset: { dx: number; dy: number };
-    }
-    | null
-  >(null);
-  const selectionLastPointerCellRef = useRef<{ x: number; y: number } | null>(null);
-  const selectionActionActiveRef = useRef(false);
-  const selectionPointerIdRef = useRef<number | null>(null);
   const moveDragRef = useRef<MoveDrag | null>(null);
   const [dragStartIndex, setDragStartIndex] = useState<number | null>(null);
   const [pathPreview, setPathPreview] = useState<Set<number> | null>(null);
-  const [selection, setSelection, selectionRef] = useStateWithRef<SelectionState | null>(null);
-  const [selectionPreviewRect, setSelectionPreviewRect] = useState<SelectionRect | null>(null);
   const prevDimensionsRef = useRef({ width: gridWidth, height: gridHeight });
   const [isMobile, setIsMobile] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<"layers" | "palette" | null>(null);
@@ -258,56 +244,6 @@ export function PixelPencil() {
     [gridHeight],
   );
 
-  const normalizeSelectionRect = useCallback(
-    (start: { x: number; y: number }, end: { x: number; y: number }): SelectionRect => {
-      const startX = clampCellX(start.x);
-      const startY = clampCellY(start.y);
-      const endX = clampCellX(end.x);
-      const endY = clampCellY(end.y);
-      const minX = Math.min(startX, endX);
-      const minY = Math.min(startY, endY);
-      const maxX = Math.max(startX, endX);
-      const maxY = Math.max(startY, endY);
-      const width = Math.min(maxX - minX + 1, gridWidth - minX);
-      const height = Math.min(maxY - minY + 1, gridHeight - minY);
-      return {
-        x: minX,
-        y: minY,
-        width: Math.max(1, width),
-        height: Math.max(1, height),
-      };
-    },
-    [clampCellX, clampCellY, gridHeight, gridWidth],
-  );
-
-  const selectionContainsCell = useCallback(
-    (sel: SelectionState, cellX: number, cellY: number) => {
-      const left = sel.rect.x + sel.offset.dx;
-      const top = sel.rect.y + sel.offset.dy;
-      return (
-        cellX >= left &&
-        cellX < left + sel.rect.width &&
-        cellY >= top &&
-        cellY < top + sel.rect.height
-      );
-    },
-    [],
-  );
-
-  const clampSelectionOffset = useCallback(
-    (rect: SelectionRect, desired: { dx: number; dy: number }) => {
-      const minDx = -(rect.x + rect.width - 1);
-      const maxDx = gridWidth - 1 - rect.x;
-      const minDy = -(rect.y + rect.height - 1);
-      const maxDy = gridHeight - 1 - rect.y;
-      return {
-        dx: Math.min(Math.max(desired.dx, minDx), maxDx),
-        dy: Math.min(Math.max(desired.dy, minDy), maxDy),
-      };
-    },
-    [gridHeight, gridWidth],
-  );
-
   const coordsToIndex = useCallback(
     (x: number, y: number) => y * gridWidth + x,
     [gridWidth],
@@ -318,78 +254,23 @@ export function PixelPencil() {
     [gridHeight, gridWidth],
   );
 
-  const captureSelectionPixels = useCallback(
-    (rect: SelectionRect, source = activeLayerPixelsRef.current): SelectionPixel[] => {
-      const result: SelectionPixel[] = [];
-      for (let relY = 0; relY < rect.height; relY += 1) {
-        for (let relX = 0; relX < rect.width; relX += 1) {
-          const absX = rect.x + relX;
-          const absY = rect.y + relY;
-          if (!isInBounds(absX, absY)) continue;
-          const index = coordsToIndex(absX, absY);
-          const color = source[index];
-          if (color === null) continue;
-          result.push({ relX, relY, color });
-        }
-      }
-      return result;
-    },
-    [activeLayerPixelsRef, coordsToIndex, isInBounds],
-  );
-
-  const applySelectionToLayer = useCallback(
-    (target: SelectionState, offset: { dx: number; dy: number }, mode: "apply" | "clear") => {
-      if (!target.pixels.length) return;
-      setActiveLayerPixels((prev) => {
-        const next = [...prev];
-        let changed = false;
-        for (const pixel of target.pixels) {
-          const targetX = target.rect.x + pixel.relX + offset.dx;
-          const targetY = target.rect.y + pixel.relY + offset.dy;
-          if (!isInBounds(targetX, targetY)) continue;
-          const index = coordsToIndex(targetX, targetY);
-          const nextValue = mode === "clear" ? null : pixel.color;
-          if (next[index] === nextValue) continue;
-          next[index] = nextValue;
-          changed = true;
-        }
-        return changed ? next : prev;
-      });
-    },
-    [coordsToIndex, isInBounds, setActiveLayerPixels],
-  );
-  
-  const clearSelectionState = useCallback(() => {
-    setSelection(null);
-    setSelectionPreviewRect(null);
-    setPathPreview(null);
-  }, [setPathPreview, setSelection]);
-
-  const selectionCancelClickRef = useRef(false);
-
-  const releaseSelectionPointerCapture = useCallback(
-    (pointerId?: number | null) => {
-      const activePointerId = selectionPointerIdRef.current;
-      if (activePointerId === null) return;
-      if (typeof pointerId === "number" && pointerId !== activePointerId) {
-        return;
-      }
-      const canvas = gridRef.current;
-      if (
-        canvas &&
-        typeof canvas.releasePointerCapture === "function" &&
-        canvas.hasPointerCapture?.(activePointerId)
-      ) {
-        try {
-          canvas.releasePointerCapture(activePointerId);
-        } catch {
-          // ignore release failures
-        }
-      }
-      selectionPointerIdRef.current = null;
-    },
-    [gridRef],
-  );
+  const selectionState = useSelectionState({
+    gridWidth,
+    gridHeight,
+    gridRef,
+    activeLayerPixelsRef,
+    setActiveLayerPixels,
+    setPathPreview,
+  });
+  const {
+    selection,
+    setSelection,
+    selectionRef,
+    selectionPreviewRect,
+    selectionContainsCell,
+    captureSelectionPixels,
+    restoreSelection,
+  } = selectionState;
 
   const captureSnapshot = useCallback(
     (): LayerSnapshot => ({
@@ -419,23 +300,14 @@ export function PixelPencil() {
         const cloned = targetLayer.pixels.slice();
         setActiveLayerPixelsState(cloned);
       }
-      setSelection(cloneSelection(snapshot.selection));
-      setSelectionPreviewRect(null);
-      selectionDraftOriginRef.current = null;
-      selectionMoveRef.current = null;
-      selectionLastPointerCellRef.current = null;
-      selectionActionActiveRef.current = false;
-      selectionCancelClickRef.current = false;
-      releaseSelectionPointerCapture();
+      restoreSelection(snapshot.selection);
       setHoverIndexIfChanged(null);
     },
     [
-      releaseSelectionPointerCapture,
+      restoreSelection,
       setActiveLayerPixelsState,
       setHoverIndexIfChanged,
       setLayers,
-      setSelection,
-      setSelectionPreviewRect,
       totalCells,
     ],
   );
@@ -455,73 +327,6 @@ export function PixelPencil() {
     undo,
     redo,
   } = useEditorHistory({ captureSnapshot, applySnapshot });
-
-  const cancelSelection = useCallback(() => {
-    const hadDraft = selectionDraftOriginRef.current !== null;
-    if (selectionDraftOriginRef.current) {
-      selectionDraftOriginRef.current = null;
-    }
-    if (selectionMoveRef.current) {
-      selectionMoveRef.current = null;
-    }
-    selectionLastPointerCellRef.current = null;
-    const current = selectionRef.current;
-    if (!current && !hadDraft) {
-      return false;
-    }
-    if (current?.isFloating) {
-      applySelectionToLayer(current, current.offset, "apply");
-    }
-    clearSelectionState();
-    releaseSelectionPointerCapture();
-    if (selectionActionActiveRef.current) {
-      finalizeAction();
-      selectionActionActiveRef.current = false;
-    }
-    selectionCancelClickRef.current = false;
-    return true;
-  }, [applySelectionToLayer, clearSelectionState, finalizeAction, releaseSelectionPointerCapture, selectionRef]);
-
-  const selectEntireCanvas = useCallback(() => {
-    if (gridWidth <= 0 || gridHeight <= 0) {
-      return;
-    }
-    cancelSelection();
-    const rect: SelectionRect = {
-      x: 0,
-      y: 0,
-      width: gridWidth,
-      height: gridHeight,
-    };
-    const pixels = captureSelectionPixels(rect);
-    setSelection({
-      rect,
-      offset: { dx: 0, dy: 0 },
-      pixels,
-      isFloating: false,
-    });
-    setSelectionPreviewRect(null);
-    setPathPreview(null);
-  }, [cancelSelection, captureSelectionPixels, gridHeight, gridWidth, setPathPreview, setSelection]);
-
-  const finalizeSelectionMove = useCallback(() => {
-    setSelection((current) => {
-      if (!current || !current.isFloating) {
-        return current;
-      }
-      applySelectionToLayer(current, current.offset, "apply");
-      return {
-        ...current,
-        rect: {
-          ...current.rect,
-          x: current.rect.x + current.offset.dx,
-          y: current.rect.y + current.offset.dy,
-        },
-        offset: { dx: 0, dy: 0 },
-        isFloating: false,
-      };
-    });
-  }, [applySelectionToLayer, setSelection]);
 
   const setMoveLayerPixels = useCallback((layerId: string, pixels: PixelValue[]) => {
     const index = layersRef.current.findIndex((layer) => layer.id === layerId);
@@ -568,20 +373,6 @@ export function PixelPencil() {
     }
     return true;
   }, [finalizeAction, layersRef, restoreStacks, selectionRef, setActiveLayerPixelsState, setMoveLayerPixels, setSelection]);
-
-  const deleteSelection = useCallback(() => {
-    const current = selectionRef.current;
-    if (!current) return;
-    if (!current.isFloating && current.pixels.length) {
-      beginAction();
-      applySelectionToLayer(current, current.offset, "clear");
-      finalizeAction();
-    } else if (current.isFloating && current.pixels.length) {
-      beginAction();
-      finalizeAction();
-    }
-    clearSelectionState();
-  }, [applySelectionToLayer, beginAction, clearSelectionState, finalizeAction, selectionRef]);
 
   const paletteColors = useMemo(
     () => [...currentPalette.colors, "transparent"] as PaletteColor[],
@@ -812,25 +603,6 @@ export function PixelPencil() {
   }, [gridHeight, gridWidth, setCanvasPixelSize]);
 
   useEffect(() => {
-    if (tool === "rect-select" || selectionPointerIdRef.current === null) {
-      return;
-    }
-    const canvas = gridRef.current;
-    if (
-      canvas &&
-      typeof canvas.releasePointerCapture === "function" &&
-      canvas.hasPointerCapture?.(selectionPointerIdRef.current)
-    ) {
-      try {
-        canvas.releasePointerCapture(selectionPointerIdRef.current);
-      } catch {
-        // ignore release failures
-      }
-    }
-    selectionPointerIdRef.current = null;
-  }, [tool]);
-
-  useEffect(() => {
     if (tool !== "line" && tool !== "shape") {
       setDragStartIndex(null);
       setPathPreview(null);
@@ -907,50 +679,6 @@ export function PixelPencil() {
     isSettingsDialogOpen,
     setTool,
   ]);
-
-  useEffect(() => {
-    const isEditableTarget = (target: EventTarget | null) => {
-      if (!(target instanceof HTMLElement)) return false;
-      const tag = target.tagName;
-      return (
-        tag === "INPUT" ||
-        tag === "TEXTAREA" ||
-        target.isContentEditable ||
-        target.getAttribute("role") === "textbox"
-      );
-    };
-
-    const handleSelectionKeys = (event: KeyboardEvent) => {
-      if (isEditableTarget(event.target)) {
-        return;
-      }
-      const key = event.key.toLowerCase();
-      if (key === "delete" || key === "backspace") {
-        if (selectionRef.current) {
-          event.preventDefault();
-          deleteSelection();
-        }
-        return;
-      }
-      if (key === "escape") {
-        if (
-          selectionRef.current ||
-          selectionDraftOriginRef.current ||
-          selectionMoveRef.current
-        ) {
-          event.preventDefault();
-          cancelSelection();
-        }
-        return;
-      }
-      if (key === "a" && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        selectEntireCanvas();
-      }
-    };
-    window.addEventListener("keydown", handleSelectionKeys);
-    return () => window.removeEventListener("keydown", handleSelectionKeys);
-  }, [cancelSelection, deleteSelection, selectEntireCanvas, selectionRef]);
 
   const computeBrushIndices = useCallback(
     (centerIndex: number) =>
@@ -1384,6 +1112,24 @@ export function PixelPencil() {
     [clampCellX, clampCellY, coordsToIndex, isInBounds, resolvePositionFromClientPoint],
   );
 
+  const {
+    cancelSelection,
+    beginRectSelectGesture,
+    handleSelectionBackgroundPointerDown,
+    finalizeRectSelectionPointerUp,
+    updateRectSelectionFromClientPoint,
+  } = useSelectionGestures({
+    state: selectionState,
+    tool,
+    gridWidth,
+    gridHeight,
+    gridWrapperRef,
+    setPathPreview,
+    resolvePointerFromClientPoint,
+    beginAction,
+    finalizeAction,
+  });
+
   const resolvePointerFromPointerEvent = useCallback(
     (event: ReactPointerEvent<Element>, options?: { clamp?: boolean }) =>
       resolvePointerFromClientPoint(event.clientX, event.clientY, options),
@@ -1582,77 +1328,7 @@ export function PixelPencil() {
       if (tool === "rect-select") {
         const resolved = resolvePointerFromPointerEvent(event, { clamp: true });
         if (!resolved) return;
-        const cellX = resolved.cellX;
-        const cellY = resolved.cellY;
-        const activeSelection = selectionRef.current;
-
-        if (activeSelection && selectionContainsCell(activeSelection, cellX, cellY)) {
-          if (typeof event.currentTarget.setPointerCapture === "function") {
-            try {
-              event.currentTarget.setPointerCapture(event.pointerId);
-              selectionPointerIdRef.current = event.pointerId;
-            } catch {
-              selectionPointerIdRef.current = null;
-            }
-          }
-          selectionDraftOriginRef.current = null;
-          selectionMoveRef.current = {
-            pointer: { x: cellX, y: cellY },
-            startOffset: activeSelection.offset,
-          };
-          if (activeSelection.pixels.length) {
-            beginAction();
-            selectionActionActiveRef.current = true;
-            if (!activeSelection.isFloating) {
-              applySelectionToLayer(activeSelection, activeSelection.offset, "clear");
-              setSelection((prev) =>
-                prev
-                  ? {
-                    ...prev,
-                    offset: { dx: 0, dy: 0 },
-                    isFloating: true,
-                  }
-                  : prev,
-              );
-            }
-          }
-          return;
-        }
-
-        if (activeSelection && !selectionContainsCell(activeSelection, cellX, cellY)) {
-          cancelSelection();
-          selectionCancelClickRef.current = true;
-        } else {
-          selectionCancelClickRef.current = false;
-        }
-
-        if (typeof event.currentTarget.setPointerCapture === "function") {
-          try {
-            event.currentTarget.setPointerCapture(event.pointerId);
-            selectionPointerIdRef.current = event.pointerId;
-          } catch {
-            selectionPointerIdRef.current = null;
-          }
-        }
-
-        selectionMoveRef.current = null;
-        selectionDraftOriginRef.current = {
-          x: clampCellX(resolved.cellX),
-          y: clampCellY(resolved.cellY),
-        };
-        selectionLastPointerCellRef.current = {
-          x: selectionDraftOriginRef.current.x,
-          y: selectionDraftOriginRef.current.y,
-        };
-        clearSelectionState();
-        const initialRect = {
-          x: selectionDraftOriginRef.current.x,
-          y: selectionDraftOriginRef.current.y,
-          width: 1,
-          height: 1,
-        };
-        setSelectionPreviewRect(initialRect);
-        setPathPreview(null);
+        beginRectSelectGesture(event.currentTarget, event.pointerId, resolved.cellX, resolved.cellY);
         return;
       }
       const resolved = resolvePointerFromPointerEvent(event, { clamp: true });
@@ -1771,15 +1447,12 @@ export function PixelPencil() {
       activeColor,
       activeLayerId,
       applyBrush,
-      applySelectionToLayer,
       autoPickLayer,
       beginAction,
+      beginRectSelectGesture,
       buildLinePreview,
       buildPreviewFromAppliedCells,
       cancelSelection,
-      clampCellX,
-      clampCellY,
-      clearSelectionState,
       computeLineIndices,
       computeShapeCells,
       coordsToIndex,
@@ -1797,7 +1470,6 @@ export function PixelPencil() {
       setActiveLayerPixelsState,
       setDrawValue,
       setHoverIndexIfChanged,
-      setSelection,
       shapeFilled,
       shapeType,
       startStroke,
@@ -1805,83 +1477,6 @@ export function PixelPencil() {
       zoomAtClientPoint,
       zoomMode,
   ],
-  );
-
-  const handleSelectionBackgroundPointerDown = useCallback(
-    (event: ReactPointerEvent<HTMLCanvasElement>) => {
-      if (tool === "move") return;
-      if (
-        !selectionRef.current &&
-        !selectionDraftOriginRef.current &&
-        !selectionMoveRef.current
-      ) {
-        return;
-      }
-      event.preventDefault();
-      selectionCancelClickRef.current = true;
-      cancelSelection();
-    },
-    [cancelSelection, selectionRef, tool],
-  );
-
-  const finalizeRectSelectionPointerUp = useCallback(
-    (eventData: { clientX: number; clientY: number; pointerId?: number | null }) => {
-      if (tool !== "rect-select") return false;
-      const draftStart = selectionDraftOriginRef.current;
-      let handled = false;
-      if (draftStart) {
-        const resolved = resolvePointerFromClientPoint(eventData.clientX, eventData.clientY, {
-          clamp: true,
-        });
-        const fallback = selectionLastPointerCellRef.current ?? draftStart;
-        const endCell = resolved
-          ? { x: resolved.cellX, y: resolved.cellY }
-          : fallback;
-        const rect = normalizeSelectionRect(draftStart, endCell);
-        selectionDraftOriginRef.current = null;
-        selectionLastPointerCellRef.current = null;
-        setSelectionPreviewRect(null);
-        setPathPreview(null);
-        if (selectionCancelClickRef.current) {
-          selectionCancelClickRef.current = false;
-        } else {
-          const pixels = captureSelectionPixels(rect);
-          setSelection({
-            rect,
-            offset: { dx: 0, dy: 0 },
-            pixels,
-            isFloating: false,
-          });
-        }
-        handled = true;
-      } else if (selectionMoveRef.current) {
-        selectionMoveRef.current = null;
-        finalizeSelectionMove();
-        if (selectionActionActiveRef.current) {
-          finalizeAction();
-          selectionActionActiveRef.current = false;
-        }
-        setPathPreview(null);
-        selectionCancelClickRef.current = false;
-        handled = true;
-      }
-      if (handled) {
-        releaseSelectionPointerCapture(eventData.pointerId ?? null);
-      }
-      return handled;
-    },
-    [
-      captureSelectionPixels,
-      finalizeAction,
-      finalizeSelectionMove,
-      normalizeSelectionRect,
-      releaseSelectionPointerCapture,
-      resolvePointerFromClientPoint,
-      setPathPreview,
-      setSelection,
-      setSelectionPreviewRect,
-      tool,
-    ],
   );
 
   const handlePointerEnter = useCallback(
@@ -1924,60 +1519,6 @@ export function PixelPencil() {
       tool,
       updateShiftLinePreview,
       resolvePointerFromPointerEvent,
-    ],
-  );
-
-  const updateRectSelectionFromClientPoint = useCallback(
-    (clientX: number, clientY: number) => {
-      if (tool !== "rect-select") return false;
-      const resolved = resolvePointerFromClientPoint(clientX, clientY, {
-        clamp: true,
-      });
-      if (!resolved) return false;
-      if (selectionDraftOriginRef.current) {
-        selectionLastPointerCellRef.current = {
-          x: resolved.cellX,
-          y: resolved.cellY,
-        };
-        const rect = normalizeSelectionRect(selectionDraftOriginRef.current, {
-          x: resolved.cellX,
-          y: resolved.cellY,
-        });
-        if (
-          selectionCancelClickRef.current &&
-          (rect.x !== selectionDraftOriginRef.current.x ||
-            rect.y !== selectionDraftOriginRef.current.y ||
-            rect.width > 1 ||
-            rect.height > 1)
-        ) {
-          selectionCancelClickRef.current = false;
-        }
-        setSelectionPreviewRect(rect);
-        setPathPreview(null);
-      } else if (selectionMoveRef.current && selectionRef.current) {
-        const activeSelection = selectionRef.current;
-        const deltaX = resolved.cellX - selectionMoveRef.current.pointer.x;
-        const deltaY = resolved.cellY - selectionMoveRef.current.pointer.y;
-        const desired = {
-          dx: selectionMoveRef.current.startOffset.dx + deltaX,
-          dy: selectionMoveRef.current.startOffset.dy + deltaY,
-        };
-        const clamped = clampSelectionOffset(activeSelection.rect, desired);
-        setSelection((prev) =>
-          prev ? { ...prev, offset: clamped } : prev,
-        );
-      }
-      return true;
-    },
-    [
-      clampSelectionOffset,
-      normalizeSelectionRect,
-      resolvePointerFromClientPoint,
-      selectionRef,
-      setPathPreview,
-      setSelection,
-      setSelectionPreviewRect,
-      tool,
     ],
   );
 
@@ -2227,106 +1768,6 @@ export function PixelPencil() {
     }
   }, [setHoverIndexIfChanged, tool]);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return undefined;
-    const handleGlobalSelectionPointerUp = (clientX: number, clientY: number, pointerId: number | null) => {
-      if (
-        selectionDraftOriginRef.current === null &&
-        selectionMoveRef.current === null
-      ) {
-        return;
-      }
-      if (
-        selectionPointerIdRef.current !== null &&
-        pointerId !== null &&
-        pointerId !== selectionPointerIdRef.current
-      ) {
-        return;
-      }
-      finalizeRectSelectionPointerUp({
-        clientX,
-        clientY,
-        pointerId,
-      });
-    };
-    const supportsPointerEvents =
-      typeof window.PointerEvent !== "undefined";
-    if (supportsPointerEvents) {
-      const pointerListener = (event: PointerEvent) => {
-        handleGlobalSelectionPointerUp(event.clientX, event.clientY, event.pointerId);
-      };
-      window.addEventListener("pointerup", pointerListener);
-      return () => window.removeEventListener("pointerup", pointerListener);
-    }
-    const mouseListener = (event: MouseEvent) => {
-      handleGlobalSelectionPointerUp(event.clientX, event.clientY, null);
-    };
-    const touchListener = (event: TouchEvent) => {
-      const touch = event.changedTouches[0];
-      if (!touch) return;
-      handleGlobalSelectionPointerUp(touch.clientX, touch.clientY, null);
-    };
-    window.addEventListener("mouseup", mouseListener);
-    window.addEventListener("touchend", touchListener);
-    window.addEventListener("touchcancel", touchListener);
-    return () => {
-      window.removeEventListener("mouseup", mouseListener);
-      window.removeEventListener("touchend", touchListener);
-      window.removeEventListener("touchcancel", touchListener);
-    };
-  }, [finalizeRectSelectionPointerUp]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return undefined;
-    const handleMove = (clientX: number, clientY: number, pointerId: number | null) => {
-      if (tool !== "rect-select") return;
-      if (
-        selectionDraftOriginRef.current === null &&
-        selectionMoveRef.current === null
-      ) {
-        return;
-      }
-      if (
-        selectionPointerIdRef.current !== null &&
-        pointerId !== null &&
-        pointerId !== selectionPointerIdRef.current
-      ) {
-        return;
-      }
-      updateRectSelectionFromClientPoint(clientX, clientY);
-    };
-    const supportsPointerEvents =
-      typeof window.PointerEvent !== "undefined";
-    if (supportsPointerEvents) {
-      const pointerListener = (event: PointerEvent) => {
-        handleMove(event.clientX, event.clientY, event.pointerId);
-      };
-      window.addEventListener("pointermove", pointerListener);
-      return () => window.removeEventListener("pointermove", pointerListener);
-    }
-    const mouseListener = (event: MouseEvent) => {
-      handleMove(event.clientX, event.clientY, null);
-    };
-    const touchListener = (event: TouchEvent) => {
-      if (
-        selectionDraftOriginRef.current === null &&
-        selectionMoveRef.current === null
-      ) {
-        return;
-      }
-      const touch = event.touches[0];
-      if (!touch) return;
-      event.preventDefault();
-      handleMove(touch.clientX, touch.clientY, null);
-    };
-    window.addEventListener("mousemove", mouseListener);
-    window.addEventListener("touchmove", touchListener, { passive: false });
-    return () => {
-      window.removeEventListener("mousemove", mouseListener);
-      window.removeEventListener("touchmove", touchListener);
-    };
-  }, [tool, updateRectSelectionFromClientPoint]);
-
   const bucketPreview = useMemo(() => {
     if (!previewToolEffects || hoverIndex === null || tool !== "bucket") return null;
     const targetColor = activeLayerPixels[hoverIndex];
@@ -2427,23 +1868,6 @@ export function PixelPencil() {
 
   useEscapeKey(isHotkeysDialogOpen, handleCloseHotkeysDialog);
   useEscapeKey(isSaveDialogOpen, handleCloseSaveDialog);
-
-  useEffect(() => {
-    const handleGlobalPointerDown = (event: PointerEvent) => {
-      const wrapper = gridWrapperRef.current;
-      if (!wrapper) return;
-      const target = event.target as Node | null;
-      if (!target) return;
-      if (target instanceof Element && target.closest("[data-pixel-tool], [data-tool-settings]")) return;
-      if (!wrapper.contains(target)) {
-        cancelSelection();
-      }
-    };
-    window.addEventListener("pointerdown", handleGlobalPointerDown);
-    return () => {
-      window.removeEventListener("pointerdown", handleGlobalPointerDown);
-    };
-  }, [cancelSelection]);
 
   const selectedColorStyles = useMemo<SelectedColorStyles>(
     () =>
