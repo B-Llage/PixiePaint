@@ -371,6 +371,53 @@ describe("PixelPencil grid resize", () => {
   });
 });
 
+describe("PixelPencil grid resize during an open action", () => {
+  const undoButton = () => screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement;
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("a grid resize during an open stroke clears the action without writing stale cells", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Start center stroke" }));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    setGridSize("Grid Width", 8);
+    setGridSize("Grid Height", 8);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Finish center stroke" }));
+
+    expect(Number(screen.getByTestId("grid-width").textContent)).toBe(8);
+    // The stroke's cell (4, 4) was painted before the resize and survives it; the
+    // pointer-up at (6, 4) must not paint anything, and nothing may sit outside 8x8.
+    expect(paintedCells().filter((index) => index >= 64 || index === 4 * 8 + 6)).toEqual([]);
+    expect(undoButton().disabled).toBe(true);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("a grid resize during a move drag ends the drag and leaves history empty", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Paint origin" }));
+    await waitFor(() => expect(firstTwoPixels()[0]).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Move" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start move" }));
+    fireEvent.click(screen.getByRole("button", { name: "Drag one cell" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    setGridSize("Grid Width", 8);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Finish move" }));
+
+    expect(Number(screen.getByTestId("grid-width").textContent)).toBe(8);
+    expect(undoButton().disabled).toBe(true);
+    // The layer keeps the cell where the drag had moved it; no old-size copy is written back.
+    expect(paintedCells()).toEqual([1]);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+});
+
 describe("PixelPencil viewport", () => {
   it("updates the canvas pointer settings when the setting or selected tool changes", () => {
     render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);

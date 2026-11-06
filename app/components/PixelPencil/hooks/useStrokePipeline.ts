@@ -75,6 +75,12 @@ export type StrokePipelineApi = {
   /** Clears the drawing flags without touching pixels or previews, when the tool changes. */
   resetDrawingState: () => void;
   /**
+   * Abandons any stroke and drops the canvas-sized masks so they reallocate at
+   * the new size, for when the grid is resized. Writes no pixels and leaves the
+   * history action to the caller.
+   */
+  resetForGrid: () => void;
+  /**
    * Pencil and eraser: paints the first cell and, for a freehand stroke, starts
    * collecting the cells the pointer crosses for the preview and the final commit.
    */
@@ -272,6 +278,23 @@ export function useStrokePipeline({
     lastPaintedIndexRef.current = null;
   }, []);
 
+  const resetForGrid = useCallback(() => {
+    isDrawingRef.current = false;
+    activePointerIdRef.current = null;
+    lastPaintedIndexRef.current = null;
+    strokeWorldPointsRef.current = null;
+    strokeAppliedCellsRef.current = null;
+    strokePreviewRef.current = null;
+    scratchMaskRef.current = null;
+    previewMaskRef.current = null;
+    strokeMaskRef.current = null;
+    pointerQueueRef.current.length = 0;
+    if (pointerRAFRef.current !== null) {
+      window.cancelAnimationFrame(pointerRAFRef.current);
+      pointerRAFRef.current = null;
+    }
+  }, []);
+
   const startStroke = useCallback(
     (pointer: StrokePointer, nextValue: PixelValue) => {
       isDrawingRef.current = true;
@@ -459,6 +482,7 @@ export function useStrokePipeline({
     beginDragStroke,
     markLastPainted,
     resetDrawingState,
+    resetForGrid,
     beginStroke,
     appendStrokePoint,
     commitStrokeBuffer,

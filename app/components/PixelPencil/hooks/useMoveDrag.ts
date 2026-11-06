@@ -81,6 +81,12 @@ export type MoveDragApi = {
   updateMoveDrag: (clientX: number, clientY: number, pointerId: number) => void;
   /** Ends the drag: cancelled or unchanged drags restore the layer, selection and history stacks. Returns whether it handled the pointer. */
   finishMoveDrag: (pointerId: number, cancelled: boolean) => boolean;
+  /**
+   * Drops an in-progress drag without writing anything back. For when the grid
+   * is resized under it: the drag's copies are laid out for the old size, so
+   * restoring them (as `finishMoveDrag` does on cancel) would write stale pixels.
+   */
+  cancelActiveDrag: () => void;
 };
 
 const shiftRect = (rect: DirtyRect | null, dx: number, dy: number, grid: DirtyRect) =>
@@ -282,6 +288,20 @@ export function useMoveDrag({
     return true;
   }, [finalizeAction, gridRef, layersRef, restoreStacks, selectionRef, setActiveLayerId, setSelection, writeLayer]);
 
+  const cancelActiveDrag = useCallback(() => {
+    const drag = moveDragRef.current;
+    if (!drag) return;
+    moveDragRef.current = null;
+    const canvas = gridRef.current;
+    if (canvas?.hasPointerCapture?.(drag.pointerId)) {
+      try {
+        canvas.releasePointerCapture(drag.pointerId);
+      } catch {
+        // The browser may have already released capture.
+      }
+    }
+  }, [gridRef]);
+
   useEffect(() => {
     if (tool !== "move") {
       const drag = moveDragRef.current;
@@ -312,5 +332,5 @@ export function useMoveDrag({
     };
   }, [finishMoveDrag, tool, updateMoveDrag]);
 
-  return { hasActiveDrag, beginMoveDrag, updateMoveDrag, finishMoveDrag };
+  return { hasActiveDrag, beginMoveDrag, updateMoveDrag, finishMoveDrag, cancelActiveDrag };
 }

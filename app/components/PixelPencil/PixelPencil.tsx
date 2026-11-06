@@ -481,8 +481,8 @@ export function PixelPencil() {
   // position; cells outside the new grid are dropped and new cells are empty.
   // The composite follows on its own: a new size gives it a new buffer that it
   // composes in full. History tiles were taken at the old size, so history is
-  // cleared; the hover cell no longer maps to the same pixel, so the effect
-  // below drops it (a ref, which render must not write).
+  // cleared; the effect after the stroke and move hooks drops the hover cell,
+  // path preview, stroke and move drag (refs, which render must not write).
   if (layerDimensions.width !== gridWidth || layerDimensions.height !== gridHeight) {
     setLayerDimensions({ width: gridWidth, height: gridHeight });
     setLayers((prevLayers) =>
@@ -495,10 +495,6 @@ export function PixelPencil() {
     setPreviewVersion((version) => version + 1);
     clearHistory();
   }
-
-  useEffect(() => {
-    setHoverIndexIfChanged(null);
-  }, [gridHeight, gridWidth, setHoverIndexIfChanged]);
 
   // Choosing a new grid size resets the persisted canvas pixel size to the
   // closest option that keeps the artwork at a similar on-screen size.
@@ -556,6 +552,7 @@ export function PixelPencil() {
     beginDragStroke,
     markLastPainted,
     resetDrawingState,
+    resetForGrid,
     beginStroke,
     appendStrokePoint,
     commitStrokeBuffer,
@@ -755,7 +752,7 @@ export function PixelPencil() {
     finalizeAction,
   });
 
-  const { hasActiveDrag, beginMoveDrag, updateMoveDrag, finishMoveDrag } = useMoveDrag({
+  const { hasActiveDrag, beginMoveDrag, updateMoveDrag, finishMoveDrag, cancelActiveDrag } = useMoveDrag({
     gridWidth,
     gridHeight,
     tool,
@@ -774,6 +771,20 @@ export function PixelPencil() {
     beginAction,
     finalizeAction,
   });
+
+  // A resize invalidates everything laid out for the old grid: an open move drag
+  // and stroke hold old-size copies and masks, and the hover cell and path
+  // preview index into the old grid. They live in refs, which render must not
+  // write, so they are dropped here, right after the render that resized the
+  // buffers and before any pointer event can reach them. History was already
+  // cleared in render, which also ended any open action.
+  useEffect(() => {
+    cancelActiveDrag();
+    resetForGrid();
+    hoverRef.current = null;
+    pathPreviewRef.current = null;
+    requestRedraw();
+  }, [cancelActiveDrag, layerDimensions, requestRedraw, resetForGrid]);
 
   const resolvePointerFromPointerEvent = useCallback(
     (event: ReactPointerEvent<Element>, options?: { clamp?: boolean }) =>
