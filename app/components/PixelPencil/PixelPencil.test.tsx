@@ -1003,3 +1003,14 @@ describe("PixelPencil controls", () => {
     expect(within(changelog).getByText(/mobile sheets without changing the canvas size/)).not.toBeNull();
   });
 });
+
+describe("PixelPencil layers sidebar", () => {
+  it("always reserves the scrollbar so adding layers never narrows the panel", () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    const addLayer = screen.getAllByRole("button", { name: "Add Layer" })[0];
+    const scroller = addLayer.closest("[class*='overflow-y-']");
+    expect(scroller).not.toBeNull();
+    expect(scroller?.className).toContain("overflow-y-scroll");
+    expect(scroller?.className).not.toContain("overflow-y-auto");
+  });
+});
