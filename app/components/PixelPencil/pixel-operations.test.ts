@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   areLayersEqual,
   arePixelsEqual,
+  resizePixels,
   areSelectionsEqual,
   cloneLayer,
   cloneLayers,
@@ -158,5 +159,23 @@ describe("generateLayerName", () => {
     const layers = [makeLayer({ name: "Layer 2" }), makeLayer({ id: "b", name: "Layer 3" })];
     expect(generateLayerName(layers)).toBe("Layer 4");
     expect(generateLayerName([makeLayer({ name: "Background" })])).toBe("Layer 2");
+  });
+});
+
+describe("resizePixels", () => {
+  it("keeps the top-left overlap and fills new cells with null when growing", () => {
+    // 2x2: a b / c d
+    const resized = resizePixels(["a", "b", "c", "d"], { width: 2, height: 2 }, { width: 3, height: 3 });
+    expect(resized).toEqual(["a", "b", null, "c", "d", null, null, null, null]);
+  });
+
+  it("crops to the top-left when shrinking on one axis and growing on the other", () => {
+    // 3x2: a b c / d e f
+    const resized = resizePixels(["a", "b", "c", "d", "e", "f"], { width: 3, height: 2 }, { width: 2, height: 3 });
+    expect(resized).toEqual(["a", "b", "d", "e", null, null]);
+  });
+
+  it("treats a short source array as empty cells", () => {
+    expect(resizePixels(["a"], { width: 2, height: 2 }, { width: 2, height: 2 })).toEqual(["a", null, null, null]);
   });
 });
