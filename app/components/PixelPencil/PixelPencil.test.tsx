@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PixelPencilSettingsProvider } from "./context/PixelPencilSettingsContext";
 import { getPanBounds } from "./canvas-pan";
+import packageJson from "../../../package.json";
 import { PixelPencil } from "./PixelPencil";
 import { MagnifierTool, TOOLS } from "./PixelPencilTools";
 import type { PixelValue } from "./PixelPencilTypes";
@@ -670,11 +671,12 @@ describe("PixelPencil controls", () => {
   it("shows the prepared release version and patch notes in the changelog", () => {
     render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
 
-    expect(screen.getByText("v0.3.0")).not.toBeNull();
+    const versionLabel = `v${packageJson.version}`;
+    expect(screen.getByText(versionLabel)).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open changelog" }));
 
     const changelog = screen.getByRole("dialog", { name: "Changelog" });
-    expect(within(changelog).getByText("v0.3.0")).not.toBeNull();
+    expect(within(changelog).getByText(versionLabel)).not.toBeNull();
     expect(within(changelog).getByText(/Move artwork or selections with the new Move tool/)).not.toBeNull();
     expect(within(changelog).getByText(/mobile sheets without changing the canvas size/)).not.toBeNull();
   });

@@ -31,4 +31,4 @@ The persisted `useToolAsMousePointer` setting is off by default. When enabled, `
 
 ## Verification
 
-Run `npm run check` for lint, type checking, and Vitest. Tests sit beside the code they exercise. GitHub Actions runs the same gate for pull requests and `main`; the version bump waits for it to pass.
+Run `npm run check` for lint, type checking, and Vitest. Tests sit beside the code they exercise. GitHub Actions runs the same gate for pull requests and `main`. On `main`, a release job then tags and publishes a GitHub Release for the package version if that tag does not exist yet, with notes rendered from `app/changelog.json` by `scripts/release-notes.mjs`.
