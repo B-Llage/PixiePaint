@@ -33,10 +33,8 @@ import {
 } from "./pixel-operations";
 import {
   collectFillRegion,
-  computeBrushIndices as computeBrushIndicesOnGrid,
   computeLineIndices as computeLineIndicesOnGrid,
   computeShapeCells as computeShapeCellsOnGrid,
-  traceWorldSegment as traceWorldSegmentOnGrid,
 } from "./grid-geometry";
 import { checkerboardStyle } from "./checkerboard";
 import { useEscapeKey } from "./hooks/useEscapeKey";
@@ -45,6 +43,7 @@ import { useEditorHistory, type LayerSnapshot } from "./hooks/useEditorHistory";
 import { useCanvasViewport } from "./hooks/useCanvasViewport";
 import { useSelectionGestures, useSelectionState } from "./hooks/useSelection";
 import { useMoveDrag } from "./hooks/useMoveDrag";
+import { useStrokePipeline } from "./hooks/useStrokePipeline";
 import packageJson from "../../../package.json";
 
 const PALETTE_THEMES: readonly PaletteTheme[] = PixelPencilPalettes;
@@ -85,32 +84,21 @@ export function PixelPencil() {
   const totalCells = gridWidth * gridHeight;
   const createEmptyPixelArray = () =>
     new Array(totalCells).fill(null) as PixelValue[];
-  const initialLayerIdRef = useRef<string | null>(null);
-  if (!initialLayerIdRef.current) {
-    initialLayerIdRef.current = createLayerId();
-  }
-  const initialLayerPixelsRef = useRef<PixelValue[] | null>(null);
-  if (
-    !initialLayerPixelsRef.current ||
-    initialLayerPixelsRef.current.length !== totalCells
-  ) {
-    initialLayerPixelsRef.current = createEmptyPixelArray();
-  }
+  // The first layer's id and pixels are created once, on mount, and shared by
+  // the three pieces of state that start from them.
+  const [initialLayerId] = useState(() => createLayerId());
+  const [initialLayerPixels] = useState(() => createEmptyPixelArray());
   const [layers, setLayers, layersRef] = useStateWithRef<Layer[]>(() => [
     {
-      id: initialLayerIdRef.current as string,
+      id: initialLayerId,
       name: "Layer 1",
-      pixels: initialLayerPixelsRef.current as PixelValue[],
+      pixels: initialLayerPixels,
       visible: true,
     },
   ]);
-  const [activeLayerId, setActiveLayerId] = useState<string>(
-    initialLayerIdRef.current as string,
-  );
+  const [activeLayerId, setActiveLayerId] = useState<string>(initialLayerId);
   const [activeLayerPixels, setActiveLayerPixelsState, activeLayerPixelsRef] =
-    useStateWithRef<PixelValue[]>(
-    initialLayerPixelsRef.current as PixelValue[],
-  );
+    useStateWithRef<PixelValue[]>(initialLayerPixels);
   const [compositePixels, setCompositePixels, compositePixelsRef] = useStateWithRef<PixelValue[]>(
     () => createEmptyPixelArray(),
   );
@@ -138,7 +126,6 @@ export function PixelPencil() {
   const [isChangelogDialogOpen, setIsChangelogDialogOpen] = useState(false);
   const [isHotkeysDialogOpen, setIsHotkeysDialogOpen] = useState(false);
   const [zoomMode, setZoomMode] = useState<ZoomMode>("in");
-  const isDrawingRef = useRef(false);
   const drawValueRef = useRef<PixelValue>(PALETTE_THEMES[0].colors[0]);
   const [drawValueVersion, setDrawValueVersion] = useState(0);
   const setDrawValue = useCallback((value: PixelValue) => {
@@ -148,15 +135,9 @@ export function PixelPencil() {
     drawValueRef.current = value;
     setDrawValueVersion((prev) => prev + 1);
   }, []);
-  const lastPaintedIndexRef = useRef<number | null>(null);
-  const strokeWorldPointsRef = useRef<{ x: number; y: number }[] | null>(null);
-  const strokeAppliedCellsRef = useRef<Set<number> | null>(null);
   const gridWrapperRef = useRef<HTMLDivElement | null>(null);
   const gridRef = useRef<HTMLCanvasElement | null>(null);
-  const activePointerIdRef = useRef<number | null>(null);
   const ignoredCanvasPointerIdRef = useRef<number | null>(null);
-  const pointerQueueRef = useRef<{ x: number; y: number }[]>([]);
-  const pointerRAFRef = useRef<number | null>(null);
   const [dragStartIndex, setDragStartIndex] = useState<number | null>(null);
   const [pathPreview, setPathPreview] = useState<Set<number> | null>(null);
   const prevDimensionsRef = useRef({ width: gridWidth, height: gridHeight });
@@ -327,6 +308,9 @@ export function PixelPencil() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (!layers.length || gridWidth <= 0 || gridHeight <= 0) {
+      // Previews are derived from the layers; clearing them here keeps the
+      // render-frame generation below as the single writer of this state.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLayerPreviews({});
       return;
     }
@@ -399,17 +383,6 @@ export function PixelPencil() {
     return () => query.removeListener(update);
   }, []);
 
-  useEffect(() => {
-    const pointerQueue = pointerQueueRef.current;
-    return () => {
-      pointerQueue.length = 0;
-      if (pointerRAFRef.current !== null) {
-        window.cancelAnimationFrame(pointerRAFRef.current);
-        pointerRAFRef.current = null;
-      }
-    };
-  }, []);
-
   const {
     isOpen: isSaveDialogOpen,
     open: handleOpenSaveDialog,
@@ -452,6 +425,40 @@ export function PixelPencil() {
     gridWrapperRef,
     gridRef,
   });
+
+  type ResolvedPointer = {
+    index: number;
+    cellX: number;
+    cellY: number;
+    position: { x: number; y: number };
+  };
+
+  const resolvePointerFromClientPoint = useCallback(
+    (
+      clientX: number,
+      clientY: number,
+      options?: { clamp?: boolean },
+    ): ResolvedPointer | null => {
+      const position = resolvePositionFromClientPoint(clientX, clientY, options);
+      if (!position) return null;
+      let cellX = Math.floor(position.x);
+      let cellY = Math.floor(position.y);
+      if (options?.clamp) {
+        cellX = clampCellX(cellX);
+        cellY = clampCellY(cellY);
+      } else if (!isInBounds(cellX, cellY)) {
+        return null;
+      }
+      return {
+        index: coordsToIndex(cellX, cellY),
+        cellX,
+        cellY,
+        position,
+      };
+    },
+    [clampCellX, clampCellY, coordsToIndex, isInBounds, resolvePositionFromClientPoint],
+  );
+
 
   useEffect(() => {
     const currentLayer = layers.find((layer) => layer.id === activeLayerId);
@@ -508,6 +515,9 @@ export function PixelPencil() {
 
     prevDimensionsRef.current = { width: gridWidth, height: gridHeight };
     clearHistory();
+    // This effect migrates the artwork when the grid size setting changes;
+    // the hover cell no longer maps to the same pixel afterwards.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setHoverIndexIfChanged(null);
   }, [
     activeLayerId,
@@ -541,16 +551,6 @@ export function PixelPencil() {
   }, [gridHeight, gridWidth, setCanvasPixelSize]);
 
   useEffect(() => {
-    if (tool !== "line" && tool !== "shape") {
-      setDragStartIndex(null);
-      setPathPreview(null);
-      activePointerIdRef.current = null;
-      isDrawingRef.current = false;
-      lastPaintedIndexRef.current = null;
-    }
-  }, [tool]);
-
-  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
       if (key !== "z") return;
@@ -579,6 +579,55 @@ export function PixelPencil() {
     setIsResetDialogOpen(true);
   }, []);
 
+  const {
+    isDrawingRef,
+    activePointerIdRef,
+    computeBrushIndices,
+    applyBrush,
+    applyLinePath,
+    buildLinePreview,
+    capturePointer,
+    beginDragStroke,
+    markLastPainted,
+    resetDrawingState,
+    beginStroke,
+    appendStrokePoint,
+    commitStrokeBuffer,
+    stopStroke,
+    clearPointerQueue,
+    flushPointerQueue,
+    processDrawingSamples,
+  } = useStrokePipeline({
+    gridWidth,
+    gridHeight,
+    tool,
+    brushSize,
+    brushShape,
+    previewToolEffects,
+    activeLayerPixelsRef,
+    setActiveLayerPixels,
+    setPathPreview,
+    setDragStartIndex,
+    setDrawValue,
+    setHoverIndexIfChanged,
+    resolvePointerFromClientPoint,
+    markModified,
+    finalizeAction,
+  });
+
+  // Switching away from the line and shape tools abandons any drag in progress.
+  const selectTool = useCallback(
+    (next: ToolId) => {
+      setTool(next);
+      if (next !== "line" && next !== "shape") {
+        setDragStartIndex(null);
+        setPathPreview(null);
+        resetDrawingState();
+      }
+    },
+    [resetDrawingState],
+  );
+
   useEffect(() => {
     const handleToolHotkeys = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
@@ -605,7 +654,7 @@ export function PixelPencil() {
       const match = TOOLS.find((item) => item.hotkey === key);
       if (!match) return;
       event.preventDefault();
-      setTool(match.id);
+      selectTool(match.id);
     };
     window.addEventListener("keydown", handleToolHotkeys);
     return () => window.removeEventListener("keydown", handleToolHotkeys);
@@ -615,83 +664,8 @@ export function PixelPencil() {
     isHotkeysDialogOpen,
     isResetDialogOpen,
     isSettingsDialogOpen,
-    setTool,
+    selectTool,
   ]);
-
-  const computeBrushIndices = useCallback(
-    (centerIndex: number) =>
-      computeBrushIndicesOnGrid({ width: gridWidth, height: gridHeight }, centerIndex, brushSize, brushShape),
-    [brushShape, brushSize, gridHeight, gridWidth],
-  );
-
-  const applyBrush = useCallback(
-    (index: number, value: PixelValue) => {
-      const indices = computeBrushIndices(index);
-      if (indices.length === 0) return;
-
-      let changed = false;
-      setActiveLayerPixels((prev) => {
-        const next = [...prev];
-
-        for (const target of indices) {
-          if (next[target] === value) continue;
-          next[target] = value;
-          changed = true;
-        }
-
-        if (!changed) {
-          return prev;
-        }
-
-        return next;
-      });
-
-      if (changed) {
-        markModified();
-      }
-    },
-    [computeBrushIndices, markModified, setActiveLayerPixels],
-  );
-
-  const applyLinePath = useCallback(
-    (path: number[], value: PixelValue) => {
-      if (!path.length) return;
-      const current = activeLayerPixelsRef.current;
-      const next = [...current];
-      let changed = false;
-
-      for (const pathIndex of path) {
-        const indices = computeBrushIndices(pathIndex);
-        for (const target of indices) {
-          if (next[target] === value) continue;
-          next[target] = value;
-          changed = true;
-        }
-      }
-
-      if (!changed) {
-        return;
-      }
-
-      markModified();
-      setActiveLayerPixels(next);
-    },
-    [activeLayerPixelsRef, computeBrushIndices, markModified, setActiveLayerPixels],
-  );
-
-  const buildLinePreview = useCallback(
-    (path: number[]) => {
-      const preview = new Set<number>();
-      for (const index of path) {
-        const indices = computeBrushIndices(index);
-        for (const target of indices) {
-          preview.add(target);
-        }
-      }
-      return preview;
-    },
-    [computeBrushIndices],
-  );
 
   const computeLineIndices = useCallback(
     (startIndex: number, endIndex: number) =>
@@ -736,6 +710,7 @@ export function PixelPencil() {
       activeColor,
       buildLinePreview,
       computeLineIndices,
+      isDrawingRef,
       lastPointedIndex,
       previewToolEffects,
       setDrawValue,
@@ -753,16 +728,6 @@ export function PixelPencil() {
       setDrawValue(pickedColor);
     },
     [compositePixelsRef, setActiveColor, setDrawValue],
-  );
-
-  const startStroke = useCallback(
-    (resolved: ResolvedPointer, nextValue: PixelValue) => {
-      isDrawingRef.current = true;
-      setDrawValue(nextValue);
-      lastPaintedIndexRef.current = resolved.index;
-      applyBrush(resolved.index, nextValue);
-    },
-    [applyBrush, setDrawValue],
   );
 
   const computeShapeCells = useCallback(
@@ -877,104 +842,6 @@ export function PixelPencil() {
     [activeLayerId, layersRef, setHoverIndexIfChanged],
   );
 
-  const traceWorldSegment = useCallback(
-    (from: { x: number; y: number }, to: { x: number; y: number }) =>
-      traceWorldSegmentOnGrid({ width: gridWidth, height: gridHeight }, from, to),
-    [gridHeight, gridWidth],
-  );
-
-  const buildPreviewFromAppliedCells = useCallback(
-    (cells: Iterable<number>) => {
-      const preview = new Set<number>();
-      for (const cell of cells) {
-        const footprint = computeBrushIndices(cell);
-        for (const idx of footprint) {
-          preview.add(idx);
-        }
-      }
-      return preview;
-    },
-    [computeBrushIndices],
-  );
-
-  const appendStrokePoint = useCallback(
-    (worldPoint: { x: number; y: number }) => {
-      const worldPoints = strokeWorldPointsRef.current;
-      const applied = strokeAppliedCellsRef.current;
-      if (!worldPoints || !applied) return;
-      const lastPoint = worldPoints[worldPoints.length - 1];
-      if (
-        lastPoint &&
-        Math.hypot(lastPoint.x - worldPoint.x, lastPoint.y - worldPoint.y) < 0.01
-      ) {
-        return;
-      }
-      worldPoints.push(worldPoint);
-      if (lastPoint) {
-        const segmentCells = traceWorldSegment(lastPoint, worldPoint);
-        if (segmentCells.length) {
-          const newCells: number[] = [];
-          for (const cell of segmentCells) {
-            if (applied.has(cell)) continue;
-            applied.add(cell);
-            newCells.push(cell);
-          }
-          if (previewToolEffects) {
-            setPathPreview(buildPreviewFromAppliedCells(applied));
-          }
-        }
-      }
-    },
-    [buildPreviewFromAppliedCells, previewToolEffects, setPathPreview, traceWorldSegment],
-  );
-
-  const commitStrokeBuffer = useCallback(
-    (value: PixelValue) => {
-      const applied = strokeAppliedCellsRef.current;
-      if (!applied || applied.size === 0) return;
-      const targetCells = new Set<number>();
-      for (const baseCell of applied) {
-        const indices = computeBrushIndices(baseCell);
-        for (const idx of indices) {
-          targetCells.add(idx);
-        }
-      }
-      if (!targetCells.size) return;
-      setActiveLayerPixels((prev) => {
-        const next = [...prev];
-        let changed = false;
-        targetCells.forEach((idx) => {
-          if (next[idx] !== value) {
-            next[idx] = value;
-            changed = true;
-          }
-        });
-        if (!changed) {
-          return prev;
-        }
-        markModified();
-        return next;
-      });
-    },
-    [computeBrushIndices, markModified, setActiveLayerPixels],
-  );
-
-  const stopStroke = useCallback(() => {
-    isDrawingRef.current = false;
-    lastPaintedIndexRef.current = null;
-    strokeWorldPointsRef.current = null;
-    strokeAppliedCellsRef.current = null;
-    activePointerIdRef.current = null;
-    setDragStartIndex(null);
-    setPathPreview(null);
-    pointerQueueRef.current.length = 0;
-    if (pointerRAFRef.current !== null) {
-      window.cancelAnimationFrame(pointerRAFRef.current);
-      pointerRAFRef.current = null;
-    }
-    finalizeAction();
-  }, [finalizeAction]);
-
   const floodFill = useCallback(
     (startIndex: number, fillValue: PixelValue) => {
       let changed = false;
@@ -1016,39 +883,6 @@ export function PixelPencil() {
     window.addEventListener("pointerup", handlePointerUp);
     return () => window.removeEventListener("pointerup", handlePointerUp);
   }, [dragStartIndex, stopStroke, tool]);
-
-  type ResolvedPointer = {
-    index: number;
-    cellX: number;
-    cellY: number;
-    position: { x: number; y: number };
-  };
-
-  const resolvePointerFromClientPoint = useCallback(
-    (
-      clientX: number,
-      clientY: number,
-      options?: { clamp?: boolean },
-    ): ResolvedPointer | null => {
-      const position = resolvePositionFromClientPoint(clientX, clientY, options);
-      if (!position) return null;
-      let cellX = Math.floor(position.x);
-      let cellY = Math.floor(position.y);
-      if (options?.clamp) {
-        cellX = clampCellX(cellX);
-        cellY = clampCellY(cellY);
-      } else if (!isInBounds(cellX, cellY)) {
-        return null;
-      }
-      return {
-        index: coordsToIndex(cellX, cellY),
-        cellX,
-        cellY,
-        position,
-      };
-    },
-    [clampCellX, clampCellY, coordsToIndex, isInBounds, resolvePositionFromClientPoint],
-  );
 
   const {
     cancelSelection,
@@ -1102,83 +936,6 @@ export function PixelPencil() {
     [resolvePointerFromClientPoint],
   );
 
-  const flushPointerQueue = useCallback(function flushPointerQueueInternal() {
-    pointerRAFRef.current = null;
-    if (!isDrawingRef.current) {
-      pointerQueueRef.current.length = 0;
-      return;
-    }
-    const pending = pointerQueueRef.current.splice(0, pointerQueueRef.current.length);
-    let lastIndex: number | null = null;
-    for (const point of pending) {
-      const resolved = resolvePointerFromClientPoint(point.x, point.y, {
-        clamp: true,
-      });
-      if (!resolved) continue;
-      appendStrokePoint(resolved.position);
-      lastIndex = resolved.index;
-    }
-    if (lastIndex !== null) {
-      setHoverIndexIfChanged(lastIndex);
-    }
-    if (pointerQueueRef.current.length) {
-      pointerRAFRef.current = window.requestAnimationFrame(
-        flushPointerQueueInternal,
-      );
-    }
-  }, [appendStrokePoint, resolvePointerFromClientPoint, setHoverIndexIfChanged]);
-
-  const enqueuePointerPosition = useCallback(
-    (clientX: number, clientY: number) => {
-      if (typeof window === "undefined") return;
-      pointerQueueRef.current.push({ x: clientX, y: clientY });
-      if (pointerRAFRef.current === null) {
-        pointerRAFRef.current = window.requestAnimationFrame(flushPointerQueue);
-      }
-    },
-    [flushPointerQueue],
-  );
-
-  const processDrawingSamples = useCallback(
-    (samples: PointerEvent[]) => {
-      for (const sample of samples) {
-        enqueuePointerPosition(sample.clientX, sample.clientY);
-      }
-    },
-    [enqueuePointerPosition],
-  );
-
-  useEffect(() => {
-    if (typeof window === "undefined") return undefined;
-    const handleGlobalPointerMove = (event: PointerEvent) => {
-      if (!isDrawingRef.current) return;
-      if (tool === "line" || tool === "shape") {
-        return;
-      }
-      if (
-        activePointerIdRef.current !== null &&
-        event.pointerId !== activePointerIdRef.current
-      ) {
-        return;
-      }
-      const coalesced =
-        typeof event.getCoalescedEvents === "function"
-          ? event.getCoalescedEvents()
-          : [];
-      const samples =
-        coalesced.length > 0 ? [...coalesced, event] : [event];
-      processDrawingSamples(samples);
-      if (event.cancelable) {
-        event.preventDefault();
-      }
-    };
-
-    window.addEventListener("pointermove", handleGlobalPointerMove, { passive: false });
-    return () => {
-      window.removeEventListener("pointermove", handleGlobalPointerMove);
-    };
-  }, [processDrawingSamples, tool]);
-
   const handlePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>, index: number) => {
       event.preventDefault();
@@ -1219,11 +976,7 @@ export function PixelPencil() {
       }
 
       setHoverIndexIfChanged(pointerIndex);
-      pointerQueueRef.current.length = 0;
-      if (pointerRAFRef.current !== null) {
-        window.cancelAnimationFrame(pointerRAFRef.current);
-        pointerRAFRef.current = null;
-      }
+      clearPointerQueue();
 
       if (tool === "magnifier") {
         const direction = event.shiftKey ? "out" : zoomMode;
@@ -1247,15 +1000,8 @@ export function PixelPencil() {
         tool === "eraser" ? null : isErase ? null : activeColor;
 
       if (tool === "line" || tool === "shape") {
-        try {
-          event.currentTarget.setPointerCapture(event.pointerId);
-          activePointerIdRef.current = event.pointerId;
-        } catch {
-          activePointerIdRef.current = event.pointerId;
-        }
-        isDrawingRef.current = true;
-        setDrawValue(strokeColor);
-        lastPaintedIndexRef.current = null;
+        capturePointer(event.currentTarget, event.pointerId);
+        beginDragStroke(strokeColor);
         setDragStartIndex(pointerIndex);
         if (previewToolEffects) {
           const initialPath =
@@ -1275,57 +1021,32 @@ export function PixelPencil() {
           applyBrush(line[position], strokeColor);
         }
         setDrawValue(strokeColor);
-        lastPaintedIndexRef.current = pointerIndex;
+        markLastPainted(pointerIndex);
         setPathPreview(null);
         return;
       }
 
-      try {
-        event.currentTarget.setPointerCapture(event.pointerId);
-        activePointerIdRef.current = event.pointerId;
-      } catch {
-        activePointerIdRef.current = event.pointerId;
-      }
-
-      if (tool === "pencil" || tool === "eraser") {
-        strokeWorldPointsRef.current = [pointerData.position];
-        const applied = new Set<number>();
-        applied.add(pointerData.index);
-        strokeAppliedCellsRef.current = applied;
-        if (previewToolEffects) {
-          setPathPreview(buildPreviewFromAppliedCells(applied));
-        } else {
-          setPathPreview(null);
-        }
-      } else {
-        strokeWorldPointsRef.current = null;
-        strokeAppliedCellsRef.current = null;
-      }
-
-      startStroke(pointerData, strokeColor);
-      if (strokeAppliedCellsRef.current && (tool === "pencil" || tool === "eraser")) {
-        strokeAppliedCellsRef.current.add(pointerData.index);
-        if (previewToolEffects) {
-          setPathPreview(
-            buildPreviewFromAppliedCells(strokeAppliedCellsRef.current),
-          );
-        }
-      }
+      capturePointer(event.currentTarget, event.pointerId);
+      beginStroke(pointerData, strokeColor, tool === "pencil" || tool === "eraser");
     },
     [
       activeColor,
       applyBrush,
       beginAction,
+      beginDragStroke,
+      beginStroke,
+      capturePointer,
+      clearPointerQueue,
       beginMoveDrag,
       beginRectSelectGesture,
       buildLinePreview,
-      buildPreviewFromAppliedCells,
       cancelSelection,
       computeLineIndices,
       computeShapeCells,
       floodFill,
       gridWidth,
       lastPointedIndex,
+      markLastPainted,
       pickColorAtIndex,
       previewToolEffects,
       resolvePointerFromPointerEvent,
@@ -1335,7 +1056,6 @@ export function PixelPencil() {
       setHoverIndexIfChanged,
       shapeFilled,
       shapeType,
-      startStroke,
       tool,
       zoomAtClientPoint,
       zoomMode,
@@ -1375,6 +1095,7 @@ export function PixelPencil() {
       computeShapeCells,
       appendStrokePoint,
       dragStartIndex,
+      isDrawingRef,
       previewToolEffects,
       setHoverIndexIfChanged,
       shapeFilled,
@@ -1461,6 +1182,7 @@ export function PixelPencil() {
       processDrawingSamples(samples);
     },
     [
+      activePointerIdRef,
       buildLinePreview,
       computeLineIndices,
       computeShapeCells,
@@ -1474,6 +1196,7 @@ export function PixelPencil() {
       tool,
       updateShiftLinePreview,
       hasActiveDrag,
+      isDrawingRef,
       updateRectSelectionFromClientPoint,
       updateMoveDrag,
     ],
@@ -1548,6 +1271,7 @@ export function PixelPencil() {
     },
     [
       activeLayerPixelsRef,
+      activePointerIdRef,
       appendStrokePoint,
       applyLinePath,
       commitStrokeBuffer,
@@ -1601,7 +1325,7 @@ export function PixelPencil() {
         setPathPreview(null);
       }
     }
-  }, [setHoverIndexIfChanged, tool]);
+  }, [isDrawingRef, setHoverIndexIfChanged, tool]);
 
   const bucketPreview = useMemo(() => {
     if (!previewToolEffects || hoverIndex === null || tool !== "bucket") return null;
@@ -1938,7 +1662,7 @@ export function PixelPencil() {
             </nav>
             <section className="shrink-0 overflow-x-auto border-t border-zinc-900 px-4 py-2 md:px-6" aria-label="Tools">
               <div className="mx-auto max-w-4xl">
-                <Toolbox tools={TOOLS} selectedToolId={tool} onSelect={setTool} />
+                <Toolbox tools={TOOLS} selectedToolId={tool} onSelect={selectTool} />
               </div>
             </section>
             <section className="border-t border-zinc-900 px-4 md:px-6" aria-label="Tool settings">
