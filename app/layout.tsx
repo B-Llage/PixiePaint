@@ -13,9 +13,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" className="dark">
       <body
-        className="antialiased bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50"
+        className="antialiased bg-zinc-950 text-zinc-50"
       >
         <Script
           src="https://www.googletagmanager.com/gtag/js?id=G-XYQMKJD78G"

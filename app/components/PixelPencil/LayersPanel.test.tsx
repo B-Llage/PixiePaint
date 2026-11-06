@@ -27,6 +27,16 @@ function renderPanel() {
 }
 
 describe("LayersPanel", () => {
+  it("gives layer names an explicit text color so they stay readable on the card", () => {
+    // The editor shell is always dark, but the card is white when the `dark`
+    // variant is off. Without its own color the name inherited near-white text.
+    renderPanel();
+
+    const nameButton = screen.getByRole("button", { name: "Highlights" });
+    expect(nameButton.className).toContain("text-zinc-900");
+    expect(nameButton.className).toContain("dark:text-zinc-100");
+  });
+
   it("creates, selects, hides, and deletes layers through its controls", () => {
     const actions = renderPanel();
 

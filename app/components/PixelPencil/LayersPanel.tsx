@@ -226,7 +226,7 @@ export function LayersPanel({
                   setEditingLayerId(layer.id);
                   setDraftName(layer.name);
                 }}
-                className="min-w-0 flex-1 truncate text-left"
+                className="min-w-0 flex-1 truncate text-left text-zinc-900 dark:text-zinc-100"
                 title="Double-click to rename"
               >
                 {layer.name}
