@@ -185,9 +185,8 @@ export function PixelPencil() {
       recompose(changed);
       history.markModified();
       setLayerVersion((version) => version + 1);
-      if (!history.isActionInProgress()) {
-        setPreviewVersion((version) => version + 1);
-      }
+      // `capturePixelsBefore` always leaves an action open, so thumbnails catch
+      // up when it ends (`finalizeAction`) or on a structure change, not here.
       return changed;
     },
     [layersRef, recompose],
@@ -248,7 +247,6 @@ export function PixelPencil() {
     selectionRef,
     selectionPreviewRect,
     selectionContainsCell,
-    captureSelectionPixels,
     restoreSelection,
   } = selectionState;
 
@@ -737,7 +735,6 @@ export function PixelPencil() {
     setActiveLayerId,
     selectionRef,
     setSelection,
-    captureSelectionPixels,
     resolvePointerFromClientPoint,
     editLayer,
     getLayerBuffer,

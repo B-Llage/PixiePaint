@@ -201,7 +201,38 @@ export function copyRect(src: PixelBuffer, dst: PixelBuffer, rect: DirtyRect): v
   }
 }
 
-/** Clears `dst`, then copies `src` shifted by (dx, dy), clipping whatever leaves the canvas. */
+/**
+ * For every cell (x, y) of `rect` (clipped to `dst`), writes `src[x - dx, y - dy]`, or
+ * `EMPTY_PIXEL` where that source cell is off the grid. Same-size buffers. Cells outside `rect`
+ * are untouched, so the cost is bounded by `rect`: this is `translateBuffer` restricted to a rect.
+ */
+export function copyShiftedRect(src: PixelBuffer, dst: PixelBuffer, rect: DirtyRect, dx: number, dy: number): void {
+  const area = intersectRect(rect, bufferRect(dst));
+  if (!area) return;
+  const { width } = dst;
+  const left = area.x;
+  const right = area.x + area.width;
+  // Destination columns whose source column x - dx lies in [0, src.width).
+  const spanStart = Math.min(right, Math.max(left, dx));
+  const spanEnd = Math.max(spanStart, Math.min(right, src.width + dx));
+  for (let y = area.y; y < area.y + area.height; y++) {
+    const rowStart = y * width;
+    const sourceY = y - dy;
+    if (sourceY < 0 || sourceY >= src.height || spanEnd <= spanStart) {
+      dst.data.fill(EMPTY_PIXEL, rowStart + left, rowStart + right);
+      continue;
+    }
+    if (spanStart > left) dst.data.fill(EMPTY_PIXEL, rowStart + left, rowStart + spanStart);
+    const sourceRow = sourceY * src.width;
+    dst.data.set(src.data.subarray(sourceRow + spanStart - dx, sourceRow + spanEnd - dx), rowStart + spanStart);
+    if (spanEnd < right) dst.data.fill(EMPTY_PIXEL, rowStart + spanEnd, rowStart + right);
+  }
+}
+
+/**
+ * Clears `dst`, then copies `src` shifted by (dx, dy), clipping whatever leaves the canvas.
+ * Whole-canvas work: for one-shot uses only, never per pointer step (see `copyShiftedRect`).
+ */
 export function translateBuffer(src: PixelBuffer, dst: PixelBuffer, dx: number, dy: number): void {
   dst.data.fill(EMPTY_PIXEL);
   const startX = Math.max(0, -dx);

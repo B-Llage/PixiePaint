@@ -6,12 +6,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { LayerEdit } from "../layer-edit";
 import {
   createBuffer,
-  extractRect,
-  intersectRect,
   toPackedValue,
   unpackColor,
   type DirtyRect,
-  type PixelBuffer,
 } from "../pixel-buffer";
 import type { ToolId } from "../PixelPencilTools";
 import type { Layer, PixelValue, SelectionRect, SelectionState } from "../PixelPencilTypes";
@@ -69,14 +66,18 @@ function setup(options: {
   const gridRef = { current: canvas as unknown as HTMLCanvasElement };
   const layersRef = { current: options.layers ?? [makeLayer("a", { 5: "#bbbbbb" })] };
   const selectionRef = { current: options.selection ?? null };
+  const edits: { layerId: string; rect: DirtyRect }[] = [];
+  /** How many edits had been made each time `beginAction` ran. */
+  const editsAtBeginAction: number[] = [];
   const history = {
     saveStacks: vi.fn(() => ({ undo: [], redo: [] })),
     restoreStacks: vi.fn(),
-    beginAction: vi.fn(),
+    beginAction: vi.fn(() => {
+      editsAtBeginAction.push(edits.length);
+    }),
     finalizeAction: vi.fn(),
   };
   const getLayerBuffer = (layerId: string) => layersRef.current.find((layer) => layer.id === layerId)?.pixels ?? null;
-  const edits: { layerId: string; rect: DirtyRect }[] = [];
   const editLayer = vi.fn((layerId: string, rect: DirtyRect, mutate: LayerEdit) => {
     edits.push({ layerId, rect });
     const buffer = getLayerBuffer(layerId);
@@ -87,14 +88,6 @@ function setup(options: {
     const cellX = Math.max(0, Math.min(GRID - 1, Math.floor(clientX / CELL)));
     const cellY = Math.max(0, Math.min(GRID - 1, Math.floor(clientY / CELL)));
     return { index: cellY * GRID + cellX, cellX, cellY };
-  };
-  const captureSelectionPixels = (rect: SelectionRect, source?: PixelBuffer) => {
-    const buffer = source ?? createBuffer(GRID, GRID);
-    const inside = intersectRect(rect, { x: 0, y: 0, width: GRID, height: GRID });
-    if (!inside || inside.width !== rect.width || inside.height !== rect.height) {
-      throw new Error("the move drag only captures on-grid rects");
-    }
-    return extractRect(buffer, rect);
   };
 
   const hook = renderHook(
@@ -117,7 +110,6 @@ function setup(options: {
         setActiveLayerId,
         selectionRef,
         setSelection,
-        captureSelectionPixels,
         resolvePointerFromClientPoint,
         editLayer,
         getLayerBuffer,
@@ -149,12 +141,12 @@ function setup(options: {
   const layerPixels = (id: string) =>
     Array.from(getLayerBuffer(id)?.data ?? [], (value) => unpackColor(value));
 
-  return { hook, canvas, layersRef, selectionRef, history, edits, press, drag, finish, layerPixels };
+  return { hook, canvas, layersRef, selectionRef, history, edits, editsAtBeginAction, press, drag, finish, layerPixels };
 }
 
 describe("useMoveDrag", () => {
   it("moves the active layer with the pointer, opening one history action after the first movement", () => {
-    const { hook, canvas, history, press, drag, finish, layerPixels } = setup();
+    const { hook, canvas, history, editsAtBeginAction, press, drag, finish, layerPixels } = setup();
     press(1, 1);
     expect(hook.result.current.api.hasActiveDrag()).toBe(true);
     expect(canvas.setPointerCapture).toHaveBeenCalledWith(1);
@@ -166,6 +158,8 @@ describe("useMoveDrag", () => {
 
     drag(2, 2);
     expect(history.beginAction).toHaveBeenCalledTimes(1);
+    // The action opens before the first write, so its before-metadata predates the move.
+    expect(editsAtBeginAction).toEqual([0]);
     expect(layerPixels("a")[5]).toBeNull();
     expect(layerPixels("a")[2 * GRID + 2]).toBe("#bbbbbb");
 

@@ -4,6 +4,7 @@ import {
   cloneBuffer,
   composeInto,
   copyRect,
+  copyShiftedRect,
   createBuffer,
   EMPTY_PIXEL,
   extractRect,
@@ -188,5 +189,63 @@ describe("pixel-buffer", () => {
     expect(composite.data[0]).toBe(BLUE);
     expect(composite.data[1]).toBe(RED); // transparent top does not cover
     expect(composite.data[2]).toBe(EMPTY_PIXEL);
+  });
+});
+
+describe("copyShiftedRect", () => {
+  /** A buffer whose every cell holds a distinct non-empty value. */
+  const numbered = () => {
+    const buffer = createBuffer(W, H);
+    for (let i = 0; i < buffer.data.length; i++) buffer.data[i] = i + 1;
+    return buffer;
+  };
+  const SENTINEL = 0xdeadbeef;
+
+  /** Runs copyShiftedRect into a sentinel-filled buffer and checks every cell against translateBuffer. */
+  const expectMatchesTranslate = (rect: { x: number; y: number; width: number; height: number }, dx: number, dy: number) => {
+    const src = numbered();
+    const dst = createBuffer(W, H);
+    dst.data.fill(SENTINEL);
+    copyShiftedRect(src, dst, rect, dx, dy);
+    const reference = createBuffer(W, H);
+    translateBuffer(src, reference, dx, dy);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const inside = x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+        expect(dst.data[at(x, y)], `cell (${x}, ${y})`).toBe(inside ? reference.data[at(x, y)] : SENTINEL);
+      }
+    }
+  };
+
+  it("writes the source cell shifted by a positive delta and leaves cells outside the rect alone", () => {
+    expectMatchesTranslate({ x: 2, y: 1, width: 4, height: 3 }, 2, 1);
+    const dst = createBuffer(W, H);
+    copyShiftedRect(numbered(), dst, { x: 3, y: 2, width: 1, height: 1 }, 2, 1);
+    expect(dst.data[at(3, 2)]).toBe(at(1, 1) + 1);
+  });
+
+  it("handles negative and mixed shifts", () => {
+    expectMatchesTranslate({ x: 1, y: 1, width: 5, height: 4 }, -2, -1);
+    expectMatchesTranslate({ x: 0, y: 0, width: W, height: H }, 3, -2);
+    expectMatchesTranslate({ x: 0, y: 0, width: W, height: H }, -3, 2);
+  });
+
+  it("fills cells whose source is off the grid with EMPTY_PIXEL at all four edges", () => {
+    expectMatchesTranslate({ x: 0, y: 0, width: 3, height: H }, 2, 0); // left edge
+    expectMatchesTranslate({ x: W - 3, y: 0, width: 3, height: H }, -2, 0); // right edge
+    expectMatchesTranslate({ x: 0, y: 0, width: W, height: 2 }, 0, 1); // top edge
+    expectMatchesTranslate({ x: 0, y: H - 2, width: W, height: 2 }, 0, -1); // bottom edge
+  });
+
+  it("empties the whole rect when the shift is larger than the grid", () => {
+    expectMatchesTranslate({ x: 0, y: 0, width: W, height: H }, W + 5, 0);
+    expectMatchesTranslate({ x: 0, y: 0, width: W, height: H }, 0, -(H + 1));
+    const dst = numbered();
+    copyShiftedRect(numbered(), dst, { x: 0, y: 0, width: W, height: H }, -100, 100);
+    expect(isBufferEmpty(dst)).toBe(true);
+  });
+
+  it("copies straight across with no shift", () => {
+    expectMatchesTranslate({ x: 2, y: 2, width: 3, height: 2 }, 0, 0);
   });
 });

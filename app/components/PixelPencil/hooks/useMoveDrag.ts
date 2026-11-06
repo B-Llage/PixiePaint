@@ -5,18 +5,18 @@ import type { EditLayer } from "../layer-edit";
 import {
   cloneBuffer,
   copyRect,
-  createBuffer,
+  copyShiftedRect,
   EMPTY_PIXEL,
+  extractRect,
   intersectRect,
   isPaintedPixel,
   nonEmptyBounds,
-  translateBuffer,
   unionRect,
   type DirtyRect,
   type PixelBuffer,
 } from "../pixel-buffer";
 import type { ToolId } from "../PixelPencilTools";
-import type { Layer, SelectionRect, SelectionState } from "../PixelPencilTypes";
+import type { Layer, SelectionState } from "../PixelPencilTypes";
 import { areSelectionsEqual, cloneSelection } from "../pixel-operations";
 import type { HistoryStacks } from "./useEditorHistory";
 
@@ -34,8 +34,6 @@ export type MoveDrag = {
   sourcePixels: PixelBuffer;
   /** The pixels that get translated: the source plus any floating selection pixels. */
   movePixels: PixelBuffer;
-  /** `movePixels` translated by the current delta; reused for every step. */
-  scratch: PixelBuffer;
   /** Bounds of `movePixels`' non-empty cells, or null when there is nothing to move. */
   sourceBounds: DirtyRect | null;
   /** Bounds of the moved pixels as last written to the layer. */
@@ -59,7 +57,6 @@ export type MoveDragOptions = {
   setActiveLayerId: (id: string) => void;
   selectionRef: RefObject<SelectionState | null>;
   setSelection: (next: SetStateAction<SelectionState | null>) => SelectionState | null;
-  captureSelectionPixels: (rect: SelectionRect, source?: PixelBuffer) => Uint32Array;
   resolvePointerFromClientPoint: (
     clientX: number,
     clientY: number,
@@ -91,9 +88,10 @@ const shiftRect = (rect: DirtyRect | null, dx: number, dy: number, grid: DirtyRe
 
 /**
  * The move tool's drag: translating a layer (and any selection on it) with
- * the pointer. The layer is copied once at pointer-down; each step translates
- * that copy into a scratch buffer and writes back only the union of where the
- * pixels started, where they were last drawn, and where they are now. The
+ * the pointer. The layer is copied once at pointer-down; each step writes the
+ * copy, shifted by the drag delta, into the layer over only the union of where
+ * the pixels started, where they were last drawn, and where they are now, so a
+ * step costs that union rather than the canvas. The
  * history action opens only once the pointer has moved, and the stacks roll
  * back when the drag is cancelled or ends where it started. While the move
  * tool is active it also listens on the window so a drag completes outside
@@ -110,7 +108,6 @@ export function useMoveDrag({
   setActiveLayerId,
   selectionRef,
   setSelection,
-  captureSelectionPixels,
   resolvePointerFromClientPoint,
   editLayer,
   getLayerBuffer,
@@ -123,12 +120,13 @@ export function useMoveDrag({
 
   const hasActiveDrag = useCallback(() => moveDragRef.current !== null, []);
 
-  /** Copies `source` over `rect` of the dragged layer through `editLayer`. */
+  /** Copies `source` shifted by (dx, dy) over `rect` of the dragged layer through `editLayer`. */
   const writeLayer = useCallback(
-    (layerId: string, source: PixelBuffer, rect: DirtyRect | null) => {
+    (layerId: string, source: PixelBuffer, rect: DirtyRect | null, dx = 0, dy = 0) => {
       if (!rect) return;
       editLayer(layerId, rect, (buffer) => {
-        copyRect(source, buffer, rect);
+        if (dx === 0 && dy === 0) copyRect(source, buffer, rect);
+        else copyShiftedRect(source, buffer, rect, dx, dy);
         return rect;
       });
     },
@@ -178,7 +176,6 @@ export function useMoveDrag({
         delta: { dx: 0, dy: 0 },
         sourcePixels,
         movePixels,
-        scratch: createBuffer(movePixels.width, movePixels.height),
         sourceBounds,
         lastBounds: sourceBounds,
         sourceSelection: currentSelection,
@@ -210,15 +207,15 @@ export function useMoveDrag({
     drag.delta = { dx, dy };
     const grid = { x: 0, y: 0, width: drag.movePixels.width, height: drag.movePixels.height };
     const atOrigin = dx === 0 && dy === 0;
-    // Back at the origin the layer shows its untouched source, without floating pixels stamped in.
-    let moved: PixelBuffer = drag.sourcePixels;
-    if (!atOrigin) {
-      translateBuffer(drag.movePixels, drag.scratch, dx, dy);
-      moved = drag.scratch;
-    }
     const shiftedBounds = shiftRect(drag.sourceBounds, dx, dy, grid);
-    const rect = unionRect(unionRect(drag.sourceBounds, drag.lastBounds), shiftedBounds);
-    writeLayer(drag.layerId, moved, rect ? intersectRect(rect, grid) : null);
+    const union = unionRect(unionRect(drag.sourceBounds, drag.lastBounds), shiftedBounds);
+    const rect = union ? intersectRect(union, grid) : null;
+    if (atOrigin) {
+      // Back at the origin the layer shows its untouched source, without floating pixels stamped in.
+      writeLayer(drag.layerId, drag.sourcePixels, rect);
+    } else {
+      writeLayer(drag.layerId, drag.movePixels, rect, dx, dy);
+    }
     drag.lastBounds = shiftedBounds;
 
     let nextSelection: SelectionState | null = null;
@@ -236,18 +233,20 @@ export function useMoveDrag({
           },
           { x: 0, y: 0, width: gridWidth, height: gridHeight },
         );
-        if (shifted) {
+        // The layer now holds the moved pixels, so the selection reads its cells from it.
+        const layerBuffer = getLayerBuffer(drag.layerId);
+        if (shifted && layerBuffer) {
           nextSelection = {
             rect: shifted,
             offset: { dx: 0, dy: 0 },
-            data: captureSelectionPixels(shifted, moved),
+            data: extractRect(layerBuffer, shifted),
             isFloating: false,
           };
         }
       }
     }
     setSelection(nextSelection);
-  }, [beginAction, captureSelectionPixels, gridHeight, gridWidth, resolvePointerFromClientPoint, setSelection, writeLayer]);
+  }, [beginAction, getLayerBuffer, gridHeight, gridWidth, resolvePointerFromClientPoint, setSelection, writeLayer]);
 
   const finishMoveDrag = useCallback((pointerId: number, cancelled: boolean) => {
     const drag = moveDragRef.current;
