@@ -1,8 +1,8 @@
 import {
   CHECKER_SIZE_OPTIONS,
-  GRID_DIMENSION_OPTIONS,
   usePixelPencilSettings,
 } from "../context/PixelPencilSettingsContext";
+import { GridDimensionInput } from "./GridDimensionInput";
 
 
 interface SettingsModalProps {
@@ -132,52 +132,23 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 </label>
               </div>
               <div className="flex flex-col gap-3">
-                <span className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
-                  Grid Width
-                </span>
-                <div className="flex flex-wrap gap-3">
-                  {GRID_DIMENSION_OPTIONS.map((size) => {
-                    const isSelected = size === gridWidth;
-                    return (
-                      <button
-                        key={`grid-width-${size}`}
-                        type="button"
-                     className={`rounded-full border border-zinc-300 px-4 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:border-zinc-700 dark:focus-visible:ring-white dark:focus-visible:ring-offset-black ${
-                          isSelected
-                            ? "border-black bg-black text-white dark:border-white dark:bg-white dark:text-black"
-                            : "bg-white text-zinc-700 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                        }`}
-                        onClick={() => setGridWidth(size)}
-                      >
-                        {size}px
-                      </button>
-                    );
-                  })}
+                <div className="flex flex-wrap items-start gap-4">
+                  <GridDimensionInput
+                    label="Grid Width"
+                    value={gridWidth}
+                    onCommit={setGridWidth}
+                  />
+                  <GridDimensionInput
+                    label="Grid Height"
+                    value={gridHeight}
+                    onCommit={setGridHeight}
+                  />
                 </div>
-              </div>
-              <div className="flex flex-col gap-3">
-                <span className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
-                  Grid Height
-                </span>
-                <div className="flex flex-wrap gap-3">
-                  {GRID_DIMENSION_OPTIONS.map((size) => {
-                    const isSelected = size === gridHeight;
-                    return (
-                      <button
-                        key={`grid-height-${size}`}
-                        type="button"
-                    className={`rounded-full border border-zinc-300 px-4 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:border-zinc-700 dark:focus-visible:ring-white dark:focus-visible:ring-offset-black ${
-                          isSelected
-                            ? "border-black bg-black text-white dark:border-white dark:bg-white dark:text-black"
-                            : "bg-white text-zinc-700 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                        }`}
-                        onClick={() => setGridHeight(size)}
-                      >
-                        {size}px
-                      </button>
-                    );
-                  })}
-                </div>
+                {gridWidth > 1024 || gridHeight > 1024 ? (
+                  <p className="text-sm text-zinc-600 dark:text-zinc-300">
+                    Very large canvases need a desktop browser.
+                  </p>
+                ) : null}
               </div>
               <div className="flex flex-col gap-3">
                 <span className="text-sm font-medium text-zinc-900 dark:text-zinc-50">

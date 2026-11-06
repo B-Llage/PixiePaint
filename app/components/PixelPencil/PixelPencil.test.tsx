@@ -329,6 +329,12 @@ describe("PixelPencil history", () => {
   });
 });
 
+function setGridSize(label: "Grid Width" | "Grid Height", value: number) {
+  const input = screen.getByLabelText(label);
+  fireEvent.change(input, { target: { value: String(value) } });
+  fireEvent.blur(input);
+}
+
 describe("PixelPencil grid resize", () => {
   const undoButton = () => screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement;
   const gridWidth = () => Number(screen.getByTestId("grid-width").textContent);
@@ -343,8 +349,7 @@ describe("PixelPencil grid resize", () => {
     expect(undoButton().disabled).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const [widthOption] = screen.getAllByRole("button", { name: "64px" });
-    fireEvent.click(widthOption);
+    setGridSize("Grid Width", 64);
 
     // The painted cell stays at (4, 4), re-indexed for the wider grid.
     expect(gridWidth()).toBe(64);
@@ -353,8 +358,7 @@ describe("PixelPencil grid resize", () => {
     expect(undoButton().disabled).toBe(true);
 
     // Shrinking keeps the top-left region, so (4, 4) survives a 16px width.
-    const [narrowOption] = screen.getAllByRole("button", { name: "16px" });
-    fireEvent.click(narrowOption);
+    setGridSize("Grid Width", 16);
     expect(gridWidth()).toBe(16);
     expect(paintedCells()).toEqual([4 * 16 + 4]);
     expect(undoButton().disabled).toBe(true);
