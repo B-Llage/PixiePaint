@@ -9,7 +9,6 @@ import {
   PaletteColor,
   PaletteTheme,
   PixelValue,
-  SelectionState,
   ShapeKind,
   ZoomMode,
 } from "./PixelPencilTypes";
@@ -27,12 +26,10 @@ import { PixelPencilModals } from "./PixelPencilModals";
 import { LayersPanel } from "./LayersPanel";
 import {
   arePixelsEqual,
-  areSelectionsEqual,
   cloneLayers,
   cloneSelection,
   composeLayers,
   generateLayerName,
-  translatePixels,
 } from "./pixel-operations";
 import {
   collectFillRegion,
@@ -44,9 +41,10 @@ import {
 import { checkerboardStyle } from "./checkerboard";
 import { useEscapeKey } from "./hooks/useEscapeKey";
 import { useStateWithRef } from "./hooks/useStateWithRef";
-import { useEditorHistory, type HistoryStacks, type LayerSnapshot } from "./hooks/useEditorHistory";
+import { useEditorHistory, type LayerSnapshot } from "./hooks/useEditorHistory";
 import { useCanvasViewport } from "./hooks/useCanvasViewport";
 import { useSelectionGestures, useSelectionState } from "./hooks/useSelection";
+import { useMoveDrag } from "./hooks/useMoveDrag";
 import packageJson from "../../../package.json";
 
 const PALETTE_THEMES: readonly PaletteTheme[] = PixelPencilPalettes;
@@ -70,19 +68,6 @@ const HOTKEY_ITEMS = [
 
 const createLayerId = () =>
   `layer-${Math.random().toString(36).slice(2, 7)}${Date.now().toString(36)}`;
-
-type MoveDrag = {
-  pointerId: number;
-  layerId: string;
-  originalActiveLayerId: string;
-  origin: { x: number; y: number };
-  delta: { dx: number; dy: number };
-  sourcePixels: PixelValue[];
-  movePixels: PixelValue[];
-  sourceSelection: SelectionState | null;
-  previousHistory: HistoryStacks;
-  actionStarted: boolean;
-};
 
 export function PixelPencil() {
   const {
@@ -172,7 +157,6 @@ export function PixelPencil() {
   const ignoredCanvasPointerIdRef = useRef<number | null>(null);
   const pointerQueueRef = useRef<{ x: number; y: number }[]>([]);
   const pointerRAFRef = useRef<number | null>(null);
-  const moveDragRef = useRef<MoveDrag | null>(null);
   const [dragStartIndex, setDragStartIndex] = useState<number | null>(null);
   const [pathPreview, setPathPreview] = useState<Set<number> | null>(null);
   const prevDimensionsRef = useRef({ width: gridWidth, height: gridHeight });
@@ -327,52 +311,6 @@ export function PixelPencil() {
     undo,
     redo,
   } = useEditorHistory({ captureSnapshot, applySnapshot });
-
-  const setMoveLayerPixels = useCallback((layerId: string, pixels: PixelValue[]) => {
-    const index = layersRef.current.findIndex((layer) => layer.id === layerId);
-    if (index < 0) return;
-    const nextLayers = [...layersRef.current];
-    nextLayers[index] = { ...nextLayers[index], pixels };
-    setLayers(nextLayers);
-    setActiveLayerPixelsState(pixels);
-  }, [layersRef, setActiveLayerPixelsState, setLayers]);
-
-  const finishMoveDrag = useCallback((pointerId: number, cancelled: boolean) => {
-    const drag = moveDragRef.current;
-    if (!drag || drag.pointerId !== pointerId) return false;
-    moveDragRef.current = null;
-    const canvas = gridRef.current;
-    if (canvas?.hasPointerCapture?.(pointerId)) {
-      try {
-        canvas.releasePointerCapture(pointerId);
-      } catch {
-        // The browser may have already released capture.
-      }
-    }
-    const currentLayer = layersRef.current.find((layer) => layer.id === drag.layerId);
-    const changed = drag.actionStarted && !!currentLayer && (
-      !arePixelsEqual(currentLayer.pixels, drag.sourcePixels) ||
-      !areSelectionsEqual(selectionRef.current, drag.sourceSelection)
-    );
-    if (cancelled || !changed) {
-      if (drag.actionStarted) {
-        setMoveLayerPixels(drag.layerId, drag.sourcePixels.slice());
-        const restoredSelection = cloneSelection(drag.sourceSelection);
-        setSelection(restoredSelection);
-        restoreStacks(drag.previousHistory);
-      }
-      if (cancelled && drag.originalActiveLayerId !== drag.layerId) {
-        const originalLayer = layersRef.current.find((layer) => layer.id === drag.originalActiveLayerId);
-        if (originalLayer) {
-          setActiveLayerId(originalLayer.id);
-          setActiveLayerPixelsState(originalLayer.pixels);
-        }
-      }
-    } else {
-      finalizeAction();
-    }
-    return true;
-  }, [finalizeAction, layersRef, restoreStacks, selectionRef, setActiveLayerPixelsState, setMoveLayerPixels, setSelection]);
 
   const paletteColors = useMemo(
     () => [...currentPalette.colors, "transparent"] as PaletteColor[],
@@ -1130,6 +1068,28 @@ export function PixelPencil() {
     finalizeAction,
   });
 
+  const { hasActiveDrag, beginMoveDrag, updateMoveDrag, finishMoveDrag } = useMoveDrag({
+    gridWidth,
+    gridHeight,
+    totalCells,
+    tool,
+    autoPickLayer,
+    gridRef,
+    layersRef,
+    setLayers,
+    activeLayerId,
+    setActiveLayerId,
+    setActiveLayerPixelsState,
+    selectionRef,
+    setSelection,
+    captureSelectionPixels,
+    resolvePointerFromClientPoint,
+    saveStacks,
+    restoreStacks,
+    beginActionWithSnapshot,
+    finalizeAction,
+  });
+
   const resolvePointerFromPointerEvent = useCallback(
     (event: ReactPointerEvent<Element>, options?: { clamp?: boolean }) =>
       resolvePointerFromClientPoint(event.clientX, event.clientY, options),
@@ -1219,55 +1179,6 @@ export function PixelPencil() {
     };
   }, [processDrawingSamples, tool]);
 
-  const updateMoveDrag = useCallback((clientX: number, clientY: number, pointerId: number) => {
-    const drag = moveDragRef.current;
-    if (!drag || drag.pointerId !== pointerId) return;
-    const resolved = resolvePointerFromClientPoint(clientX, clientY, { clamp: true });
-    if (!resolved) return;
-    const dx = resolved.cellX - drag.origin.x;
-    const dy = resolved.cellY - drag.origin.y;
-    if (dx === drag.delta.dx && dy === drag.delta.dy) return;
-    if (!drag.actionStarted) {
-      if (dx === 0 && dy === 0) return;
-      beginActionWithSnapshot({
-        layers: cloneLayers(layersRef.current, totalCells),
-        activeLayerId: drag.layerId,
-        selection: cloneSelection(drag.sourceSelection),
-      });
-      drag.actionStarted = true;
-    }
-    drag.delta = { dx, dy };
-    const nextPixels = dx === 0 && dy === 0
-      ? drag.sourcePixels.slice()
-      : translatePixels(drag.movePixels, gridWidth, gridHeight, dx, dy);
-    setMoveLayerPixels(drag.layerId, nextPixels);
-
-    let nextSelection: SelectionState | null = null;
-    if (drag.sourceSelection) {
-      if (dx === 0 && dy === 0) {
-        nextSelection = cloneSelection(drag.sourceSelection);
-      } else {
-        const sourceRect = drag.sourceSelection.rect;
-        const shiftedX = sourceRect.x + drag.sourceSelection.offset.dx + dx;
-        const shiftedY = sourceRect.y + drag.sourceSelection.offset.dy + dy;
-        const left = Math.max(0, shiftedX);
-        const top = Math.max(0, shiftedY);
-        const right = Math.min(gridWidth, shiftedX + sourceRect.width);
-        const bottom = Math.min(gridHeight, shiftedY + sourceRect.height);
-        if (right > left && bottom > top) {
-          const rect = { x: left, y: top, width: right - left, height: bottom - top };
-          nextSelection = {
-            rect,
-            offset: { dx: 0, dy: 0 },
-            pixels: captureSelectionPixels(rect, nextPixels),
-            isFloating: false,
-          };
-        }
-      }
-    }
-    setSelection(nextSelection);
-  }, [beginActionWithSnapshot, captureSelectionPixels, gridHeight, gridWidth, layersRef, resolvePointerFromClientPoint, setMoveLayerPixels, setSelection, totalCells]);
-
   const handlePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>, index: number) => {
       event.preventDefault();
@@ -1280,49 +1191,7 @@ export function PixelPencil() {
       if (tool === "move") {
         const resolved = resolvePointerFromPointerEvent(event, { clamp: true });
         if (!resolved) return;
-        const currentSelection = cloneSelection(selectionRef.current);
-        let targetLayer = layersRef.current.find((layer) => layer.id === activeLayerId);
-        if (autoPickLayer && !currentSelection) {
-          for (let layerIndex = layersRef.current.length - 1; layerIndex >= 0; layerIndex -= 1) {
-            const candidate = layersRef.current[layerIndex];
-            const pixel = candidate.pixels[resolved.index];
-            if (candidate.visible && pixel !== null && pixel !== "transparent") {
-              targetLayer = candidate;
-              break;
-            }
-          }
-        }
-        if (!targetLayer) return;
-        const sourcePixels = targetLayer.pixels.slice();
-        const movePixels = sourcePixels.slice();
-        if (currentSelection?.isFloating) {
-          for (const pixel of currentSelection.pixels) {
-            const x = currentSelection.rect.x + currentSelection.offset.dx + pixel.relX;
-            const y = currentSelection.rect.y + currentSelection.offset.dy + pixel.relY;
-            if (isInBounds(x, y)) movePixels[coordsToIndex(x, y)] = pixel.color;
-          }
-        }
-        if (targetLayer.id !== activeLayerId) {
-          setActiveLayerId(targetLayer.id);
-          setActiveLayerPixelsState(targetLayer.pixels);
-        }
-        moveDragRef.current = {
-          pointerId: event.pointerId,
-          layerId: targetLayer.id,
-          originalActiveLayerId: activeLayerId,
-          origin: { x: resolved.cellX, y: resolved.cellY },
-          delta: { dx: 0, dy: 0 },
-          sourcePixels,
-          movePixels,
-          sourceSelection: currentSelection,
-          previousHistory: saveStacks(),
-          actionStarted: false,
-        };
-        try {
-          event.currentTarget.setPointerCapture(event.pointerId);
-        } catch {
-          // Window pointer listeners still complete the drag if capture fails.
-        }
+        beginMoveDrag(event.currentTarget, event.pointerId, resolved);
         return;
       }
       if (tool === "rect-select") {
@@ -1445,29 +1314,23 @@ export function PixelPencil() {
     },
     [
       activeColor,
-      activeLayerId,
       applyBrush,
-      autoPickLayer,
       beginAction,
+      beginMoveDrag,
       beginRectSelectGesture,
       buildLinePreview,
       buildPreviewFromAppliedCells,
       cancelSelection,
       computeLineIndices,
       computeShapeCells,
-      coordsToIndex,
       floodFill,
       gridWidth,
-      isInBounds,
       lastPointedIndex,
-      layersRef,
       pickColorAtIndex,
       previewToolEffects,
       resolvePointerFromPointerEvent,
-      saveStacks,
       selectionContainsCell,
       selectionRef,
-      setActiveLayerPixelsState,
       setDrawValue,
       setHoverIndexIfChanged,
       shapeFilled,
@@ -1533,7 +1396,7 @@ export function PixelPencil() {
       const samples =
         coalesced.length > 0 ? [...coalesced, nativeEvent] : [nativeEvent];
 
-      if (tool === "move" && moveDragRef.current) {
+      if (tool === "move" && hasActiveDrag()) {
         const lastSample = samples[samples.length - 1];
         updateMoveDrag(lastSample.clientX, lastSample.clientY, nativeEvent.pointerId);
         return;
@@ -1610,6 +1473,7 @@ export function PixelPencil() {
       shapeType,
       tool,
       updateShiftLinePreview,
+      hasActiveDrag,
       updateRectSelectionFromClientPoint,
       updateMoveDrag,
     ],
@@ -1622,7 +1486,7 @@ export function PixelPencil() {
         ignoredCanvasPointerIdRef.current = null;
         return;
       }
-      if (tool === "move" && moveDragRef.current) {
+      if (tool === "move" && hasActiveDrag()) {
         updateMoveDrag(event.clientX, event.clientY, event.pointerId);
         finishMoveDrag(event.pointerId, false);
         return;
@@ -1693,6 +1557,7 @@ export function PixelPencil() {
       finalizeRectSelectionPointerUp,
       finishMoveDrag,
       flushPointerQueue,
+      hasActiveDrag,
       hoverIndex,
       lastPointedIndex,
       markModified,
@@ -1728,36 +1593,6 @@ export function PixelPencil() {
       window.removeEventListener("pointercancel", clearIgnoredPointer);
     };
   }, []);
-
-  useEffect(() => {
-    if (tool !== "move") {
-      const drag = moveDragRef.current;
-      if (drag) finishMoveDrag(drag.pointerId, true);
-      return;
-    }
-    const onMove = (event: PointerEvent) => {
-      updateMoveDrag(event.clientX, event.clientY, event.pointerId);
-    };
-    const onUp = (event: PointerEvent) => {
-      updateMoveDrag(event.clientX, event.clientY, event.pointerId);
-      finishMoveDrag(event.pointerId, false);
-    };
-    const onCancel = (event: PointerEvent) => finishMoveDrag(event.pointerId, true);
-    const onBlur = () => {
-      const drag = moveDragRef.current;
-      if (drag) finishMoveDrag(drag.pointerId, true);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onCancel);
-    window.addEventListener("blur", onBlur);
-    return () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onCancel);
-      window.removeEventListener("blur", onBlur);
-    };
-  }, [finishMoveDrag, tool, updateMoveDrag]);
 
   const handlePointerLeave = useCallback(() => {
     if (!isDrawingRef.current) {
