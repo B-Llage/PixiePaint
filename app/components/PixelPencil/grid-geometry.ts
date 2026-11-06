@@ -1,5 +1,5 @@
 import type { DirtyRect, PixelBuffer } from "./pixel-buffer";
-import type { BrushShape, PixelValue, ShapeKind } from "./PixelPencilTypes";
+import type { BrushShape, ShapeKind } from "./PixelPencilTypes";
 
 /** Pure grid algorithms over a row-major `width * height` cell grid. */
 export type GridSize = { width: number; height: number };
@@ -251,49 +251,6 @@ export function traceWorldSegment(grid: GridSize, from: GridPoint, to: GridPoint
   }
 
   return cells;
-}
-
-/**
- * Four-connected region of cells reachable from `startIndex` that share its value.
- * Used by the bucket tool for both the fill itself and its hover preview.
- */
-export function collectFillRegion(
-  pixels: readonly PixelValue[],
-  startIndex: number,
-  width: number,
-  height: number,
-): Set<number> {
-  const grid: GridSize = { width, height };
-  const targetValue = pixels[startIndex];
-  const visited = new Set<number>();
-  const stack = [startIndex];
-  const region = new Set<number>();
-
-  while (stack.length) {
-    const index = stack.pop();
-    if (index === undefined || visited.has(index)) continue;
-    visited.add(index);
-
-    if (pixels[index] !== targetValue) continue;
-
-    region.add(index);
-
-    const { x, y } = indexToCoords(grid, index);
-
-    const neighbors = [
-      { x: x - 1, y },
-      { x: x + 1, y },
-      { x, y: y - 1 },
-      { x, y: y + 1 },
-    ];
-
-    for (const { x: nx, y: ny } of neighbors) {
-      if (!isInBounds(grid, nx, ny)) continue;
-      stack.push(coordsToIndex(grid, nx, ny));
-    }
-  }
-
-  return region;
 }
 
 /** A canvas-sized, index-aligned cell mask (`1` = set) with the bounding rect of its set cells. */

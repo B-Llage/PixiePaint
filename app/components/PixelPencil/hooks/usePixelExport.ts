@@ -1,25 +1,35 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import type { RefObject } from "react";
 
 import { EXPORT_SCALES } from "../PixelPencil.constants";
-import type { PixelValue } from "../PixelPencilTypes";
+import { isPaintedPixel, unpackColor, type PixelBuffer } from "../pixel-buffer";
 
 interface UsePixelExportParams {
   gridWidth: number;
   gridHeight: number;
-  pixels: PixelValue[];
-  indexToCoords: (index: number) => { x: number; y: number };
+  /** The flattened composite the PNG is drawn from. */
+  compositeRef: RefObject<PixelBuffer>;
+  /** Bumps whenever the composite changes, so an open preview redraws. */
+  compositeVersion: number;
 }
 
+/**
+ * The Save PNG dialog: scale, filename, a live preview while open, and the download.
+ *
+ * The preview reads the composite outside render: it is drawn on the animation frame after the
+ * dialog opens, the scale changes, or the composite changes, and is null until then.
+ */
 export function usePixelExport({
   gridWidth,
   gridHeight,
-  pixels,
-  indexToCoords,
+  compositeRef,
+  compositeVersion,
 }: UsePixelExportParams) {
   const [isOpen, setIsOpen] = useState(false);
   const [exportScale, setExportScale] =
     useState<(typeof EXPORT_SCALES)[number]>(1);
   const [exportFilename, setExportFilename] = useState("pixel-art");
+  const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null);
 
   const createExportCanvas = useCallback(
     (scale: number) => {
@@ -33,21 +43,22 @@ export function usePixelExport({
 
       ctx.imageSmoothingEnabled = false;
 
-      for (let index = 0; index < pixels.length; index += 1) {
-        const color = pixels[index];
-        if (color === null || color === "transparent") {
+      const composite = compositeRef.current;
+      const { data, width } = composite;
+      for (let index = 0; index < data.length; index += 1) {
+        const value = data[index];
+        if (!isPaintedPixel(value)) {
           continue;
         }
-        const { x, y } = indexToCoords(index);
-        const drawX = x * scale;
-        const drawY = y * scale;
-        ctx.fillStyle = color;
-        ctx.fillRect(drawX, drawY, scale, scale);
+        const x = index % width;
+        const y = Math.floor(index / width);
+        ctx.fillStyle = unpackColor(value) as string;
+        ctx.fillRect(x * scale, y * scale, scale, scale);
       }
 
       return canvas;
     },
-    [gridHeight, gridWidth, indexToCoords, pixels],
+    [compositeRef, gridHeight, gridWidth],
   );
 
   const open = useCallback(() => {
@@ -56,6 +67,7 @@ export function usePixelExport({
 
   const close = useCallback(() => {
     setIsOpen(false);
+    setPreviewDataUrl(null);
   }, []);
 
   const confirmSave = useCallback(() => {
@@ -77,18 +89,21 @@ export function usePixelExport({
       URL.revokeObjectURL(url);
     }, "image/png");
     setIsOpen(false);
+    setPreviewDataUrl(null);
   }, [createExportCanvas, exportFilename, exportScale]);
 
-  const previewDataUrl = useMemo(() => {
-    if (!isOpen) {
-      return null;
-    }
-    const canvas = createExportCanvas(exportScale);
-    if (!canvas) {
-      return null;
-    }
-    return canvas.toDataURL("image/png");
-  }, [createExportCanvas, exportScale, isOpen]);
+  useEffect(() => {
+    if (!isOpen || typeof window === "undefined") return;
+    let cancelled = false;
+    const frame = window.requestAnimationFrame(() => {
+      const canvas = createExportCanvas(exportScale);
+      if (!cancelled) setPreviewDataUrl(canvas ? canvas.toDataURL("image/png") : null);
+    });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frame);
+    };
+  }, [compositeVersion, createExportCanvas, exportScale, isOpen]);
 
   return {
     isOpen,

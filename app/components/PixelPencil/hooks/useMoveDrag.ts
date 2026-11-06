@@ -1,16 +1,24 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { RefObject, SetStateAction } from "react";
 
-import type { ToolId } from "../PixelPencilTools";
-import type { Layer, PixelValue, SelectionPixel, SelectionRect, SelectionState } from "../PixelPencilTypes";
+import type { EditLayer } from "../layer-edit";
 import {
-  arePixelsEqual,
-  areSelectionsEqual,
-  cloneLayers,
-  cloneSelection,
-  translatePixels,
-} from "../pixel-operations";
-import type { HistoryStacks, LayerSnapshot } from "./useEditorHistory";
+  cloneBuffer,
+  copyRect,
+  createBuffer,
+  EMPTY_PIXEL,
+  intersectRect,
+  isPaintedPixel,
+  nonEmptyBounds,
+  translateBuffer,
+  unionRect,
+  type DirtyRect,
+  type PixelBuffer,
+} from "../pixel-buffer";
+import type { ToolId } from "../PixelPencilTools";
+import type { Layer, SelectionRect, SelectionState } from "../PixelPencilTypes";
+import { areSelectionsEqual, cloneSelection } from "../pixel-operations";
+import type { HistoryStacks } from "./useEditorHistory";
 
 type Cell = { x: number; y: number };
 
@@ -22,10 +30,16 @@ export type MoveDrag = {
   originalActiveLayerId: string;
   origin: Cell;
   delta: { dx: number; dy: number };
-  /** The layer's pixels before the drag, restored on cancel. */
-  sourcePixels: PixelValue[];
+  /** A copy of the layer taken at pointer-down, restored on cancel. */
+  sourcePixels: PixelBuffer;
   /** The pixels that get translated: the source plus any floating selection pixels. */
-  movePixels: PixelValue[];
+  movePixels: PixelBuffer;
+  /** `movePixels` translated by the current delta; reused for every step. */
+  scratch: PixelBuffer;
+  /** Bounds of `movePixels`' non-empty cells, or null when there is nothing to move. */
+  sourceBounds: DirtyRect | null;
+  /** Bounds of the moved pixels as last written to the layer. */
+  lastBounds: DirtyRect | null;
   sourceSelection: SelectionState | null;
   previousHistory: HistoryStacks;
   /** True once the pointer has moved at least one cell and a history action is open. */
@@ -37,26 +51,27 @@ export type ResolvedMovePointer = { index: number; cellX: number; cellY: number 
 export type MoveDragOptions = {
   gridWidth: number;
   gridHeight: number;
-  totalCells: number;
   tool: ToolId;
   autoPickLayer: boolean;
   gridRef: RefObject<HTMLCanvasElement | null>;
   layersRef: RefObject<Layer[]>;
-  setLayers: (next: SetStateAction<Layer[]>) => Layer[];
   activeLayerId: string;
   setActiveLayerId: (id: string) => void;
-  setActiveLayerPixelsState: (next: SetStateAction<PixelValue[]>) => PixelValue[];
   selectionRef: RefObject<SelectionState | null>;
   setSelection: (next: SetStateAction<SelectionState | null>) => SelectionState | null;
-  captureSelectionPixels: (rect: SelectionRect, source?: PixelValue[]) => SelectionPixel[];
+  captureSelectionPixels: (rect: SelectionRect, source?: PixelBuffer) => Uint32Array;
   resolvePointerFromClientPoint: (
     clientX: number,
     clientY: number,
     options?: { clamp?: boolean },
   ) => ResolvedMovePointer | null;
+  /** Writes to a layer through the editor, which records history and recomposites. */
+  editLayer: EditLayer;
+  /** The live buffer of a layer, or null when it is gone. */
+  getLayerBuffer: (layerId: string) => PixelBuffer | null;
   saveStacks: () => HistoryStacks;
   restoreStacks: (stacks: HistoryStacks) => void;
-  beginActionWithSnapshot: (snapshot: LayerSnapshot) => void;
+  beginAction: () => void;
   finalizeAction: () => void;
 };
 
@@ -71,56 +86,54 @@ export type MoveDragApi = {
   finishMoveDrag: (pointerId: number, cancelled: boolean) => boolean;
 };
 
+const shiftRect = (rect: DirtyRect | null, dx: number, dy: number, grid: DirtyRect) =>
+  rect ? intersectRect({ ...rect, x: rect.x + dx, y: rect.y + dy }, grid) : null;
+
 /**
  * The move tool's drag: translating a layer (and any selection on it) with
- * the pointer. It records the pre-drag snapshot into history only once the
- * pointer has moved, and rolls the stacks back when the drag is cancelled or
- * ends where it started. While the move tool is active it also listens on
- * the window so a drag completes outside the canvas.
+ * the pointer. The layer is copied once at pointer-down; each step translates
+ * that copy into a scratch buffer and writes back only the union of where the
+ * pixels started, where they were last drawn, and where they are now. The
+ * history action opens only once the pointer has moved, and the stacks roll
+ * back when the drag is cancelled or ends where it started. While the move
+ * tool is active it also listens on the window so a drag completes outside
+ * the canvas.
  */
 export function useMoveDrag({
   gridWidth,
   gridHeight,
-  totalCells,
   tool,
   autoPickLayer,
   gridRef,
   layersRef,
-  setLayers,
   activeLayerId,
   setActiveLayerId,
-  setActiveLayerPixelsState,
   selectionRef,
   setSelection,
   captureSelectionPixels,
   resolvePointerFromClientPoint,
+  editLayer,
+  getLayerBuffer,
   saveStacks,
   restoreStacks,
-  beginActionWithSnapshot,
+  beginAction,
   finalizeAction,
 }: MoveDragOptions): MoveDragApi {
   const moveDragRef = useRef<MoveDrag | null>(null);
 
-  const coordsToIndex = useCallback(
-    (x: number, y: number) => y * gridWidth + x,
-    [gridWidth],
-  );
-
-  const isInBounds = useCallback(
-    (x: number, y: number) => x >= 0 && x < gridWidth && y >= 0 && y < gridHeight,
-    [gridHeight, gridWidth],
-  );
-
-  const setMoveLayerPixels = useCallback((layerId: string, pixels: PixelValue[]) => {
-    const index = layersRef.current.findIndex((layer) => layer.id === layerId);
-    if (index < 0) return;
-    const nextLayers = [...layersRef.current];
-    nextLayers[index] = { ...nextLayers[index], pixels };
-    setLayers(nextLayers);
-    setActiveLayerPixelsState(pixels);
-  }, [layersRef, setActiveLayerPixelsState, setLayers]);
-
   const hasActiveDrag = useCallback(() => moveDragRef.current !== null, []);
+
+  /** Copies `source` over `rect` of the dragged layer through `editLayer`. */
+  const writeLayer = useCallback(
+    (layerId: string, source: PixelBuffer, rect: DirtyRect | null) => {
+      if (!rect) return;
+      editLayer(layerId, rect, (buffer) => {
+        copyRect(source, buffer, rect);
+        return rect;
+      });
+    },
+    [editLayer],
+  );
 
   const beginMoveDrag = useCallback(
     (canvas: HTMLCanvasElement, pointerId: number, resolved: ResolvedMovePointer) => {
@@ -129,27 +142,34 @@ export function useMoveDrag({
       if (autoPickLayer && !currentSelection) {
         for (let layerIndex = layersRef.current.length - 1; layerIndex >= 0; layerIndex -= 1) {
           const candidate = layersRef.current[layerIndex];
-          const pixel = candidate.pixels[resolved.index];
-          if (candidate.visible && pixel !== null && pixel !== "transparent") {
+          if (candidate.visible && isPaintedPixel(candidate.pixels.data[resolved.index])) {
             targetLayer = candidate;
             break;
           }
         }
       }
       if (!targetLayer) return;
-      const sourcePixels = targetLayer.pixels.slice();
-      const movePixels = sourcePixels.slice();
+      const layerBuffer = getLayerBuffer(targetLayer.id);
+      if (!layerBuffer) return;
+      const sourcePixels = cloneBuffer(layerBuffer);
+      const movePixels = cloneBuffer(sourcePixels);
       if (currentSelection?.isFloating) {
-        for (const pixel of currentSelection.pixels) {
-          const x = currentSelection.rect.x + currentSelection.offset.dx + pixel.relX;
-          const y = currentSelection.rect.y + currentSelection.offset.dy + pixel.relY;
-          if (isInBounds(x, y)) movePixels[coordsToIndex(x, y)] = pixel.color;
+        const { rect, offset, data } = currentSelection;
+        for (let relY = 0; relY < rect.height; relY += 1) {
+          const y = rect.y + offset.dy + relY;
+          if (y < 0 || y >= movePixels.height) continue;
+          for (let relX = 0; relX < rect.width; relX += 1) {
+            const x = rect.x + offset.dx + relX;
+            if (x < 0 || x >= movePixels.width) continue;
+            const value = data[relY * rect.width + relX];
+            if (value !== EMPTY_PIXEL) movePixels.data[y * movePixels.width + x] = value;
+          }
         }
       }
       if (targetLayer.id !== activeLayerId) {
         setActiveLayerId(targetLayer.id);
-        setActiveLayerPixelsState(targetLayer.pixels);
       }
+      const sourceBounds = nonEmptyBounds(movePixels);
       moveDragRef.current = {
         pointerId,
         layerId: targetLayer.id,
@@ -158,6 +178,9 @@ export function useMoveDrag({
         delta: { dx: 0, dy: 0 },
         sourcePixels,
         movePixels,
+        scratch: createBuffer(movePixels.width, movePixels.height),
+        sourceBounds,
+        lastBounds: sourceBounds,
         sourceSelection: currentSelection,
         previousHistory: saveStacks(),
         actionStarted: false,
@@ -168,17 +191,7 @@ export function useMoveDrag({
         // Window pointer listeners still complete the drag if capture fails.
       }
     },
-    [
-      activeLayerId,
-      autoPickLayer,
-      coordsToIndex,
-      isInBounds,
-      layersRef,
-      saveStacks,
-      selectionRef,
-      setActiveLayerId,
-      setActiveLayerPixelsState,
-    ],
+    [activeLayerId, autoPickLayer, getLayerBuffer, layersRef, saveStacks, selectionRef, setActiveLayerId],
   );
 
   const updateMoveDrag = useCallback((clientX: number, clientY: number, pointerId: number) => {
@@ -191,44 +204,50 @@ export function useMoveDrag({
     if (dx === drag.delta.dx && dy === drag.delta.dy) return;
     if (!drag.actionStarted) {
       if (dx === 0 && dy === 0) return;
-      beginActionWithSnapshot({
-        layers: cloneLayers(layersRef.current, totalCells),
-        activeLayerId: drag.layerId,
-        selection: cloneSelection(drag.sourceSelection),
-      });
+      beginAction();
       drag.actionStarted = true;
     }
     drag.delta = { dx, dy };
-    const nextPixels = dx === 0 && dy === 0
-      ? drag.sourcePixels.slice()
-      : translatePixels(drag.movePixels, gridWidth, gridHeight, dx, dy);
-    setMoveLayerPixels(drag.layerId, nextPixels);
+    const grid = { x: 0, y: 0, width: drag.movePixels.width, height: drag.movePixels.height };
+    const atOrigin = dx === 0 && dy === 0;
+    // Back at the origin the layer shows its untouched source, without floating pixels stamped in.
+    let moved: PixelBuffer = drag.sourcePixels;
+    if (!atOrigin) {
+      translateBuffer(drag.movePixels, drag.scratch, dx, dy);
+      moved = drag.scratch;
+    }
+    const shiftedBounds = shiftRect(drag.sourceBounds, dx, dy, grid);
+    const rect = unionRect(unionRect(drag.sourceBounds, drag.lastBounds), shiftedBounds);
+    writeLayer(drag.layerId, moved, rect ? intersectRect(rect, grid) : null);
+    drag.lastBounds = shiftedBounds;
 
     let nextSelection: SelectionState | null = null;
     if (drag.sourceSelection) {
-      if (dx === 0 && dy === 0) {
+      if (atOrigin) {
         nextSelection = cloneSelection(drag.sourceSelection);
       } else {
         const sourceRect = drag.sourceSelection.rect;
-        const shiftedX = sourceRect.x + drag.sourceSelection.offset.dx + dx;
-        const shiftedY = sourceRect.y + drag.sourceSelection.offset.dy + dy;
-        const left = Math.max(0, shiftedX);
-        const top = Math.max(0, shiftedY);
-        const right = Math.min(gridWidth, shiftedX + sourceRect.width);
-        const bottom = Math.min(gridHeight, shiftedY + sourceRect.height);
-        if (right > left && bottom > top) {
-          const rect = { x: left, y: top, width: right - left, height: bottom - top };
+        const shifted = intersectRect(
+          {
+            x: sourceRect.x + drag.sourceSelection.offset.dx + dx,
+            y: sourceRect.y + drag.sourceSelection.offset.dy + dy,
+            width: sourceRect.width,
+            height: sourceRect.height,
+          },
+          { x: 0, y: 0, width: gridWidth, height: gridHeight },
+        );
+        if (shifted) {
           nextSelection = {
-            rect,
+            rect: shifted,
             offset: { dx: 0, dy: 0 },
-            pixels: captureSelectionPixels(rect, nextPixels),
+            data: captureSelectionPixels(shifted, moved),
             isFloating: false,
           };
         }
       }
     }
     setSelection(nextSelection);
-  }, [beginActionWithSnapshot, captureSelectionPixels, gridHeight, gridWidth, layersRef, resolvePointerFromClientPoint, setMoveLayerPixels, setSelection, totalCells]);
+  }, [beginAction, captureSelectionPixels, gridHeight, gridWidth, resolvePointerFromClientPoint, setSelection, writeLayer]);
 
   const finishMoveDrag = useCallback((pointerId: number, cancelled: boolean) => {
     const drag = moveDragRef.current;
@@ -242,30 +261,27 @@ export function useMoveDrag({
         // The browser may have already released capture.
       }
     }
-    const currentLayer = layersRef.current.find((layer) => layer.id === drag.layerId);
-    const changed = drag.actionStarted && !!currentLayer && (
-      !arePixelsEqual(currentLayer.pixels, drag.sourcePixels) ||
-      !areSelectionsEqual(selectionRef.current, drag.sourceSelection)
+    // Back at the origin the layer holds its source again, so only the selection can differ.
+    const atOrigin = drag.delta.dx === 0 && drag.delta.dy === 0;
+    const changed = drag.actionStarted && (
+      !atOrigin || !areSelectionsEqual(selectionRef.current, drag.sourceSelection)
     );
     if (cancelled || !changed) {
       if (drag.actionStarted) {
-        setMoveLayerPixels(drag.layerId, drag.sourcePixels.slice());
-        const restoredSelection = cloneSelection(drag.sourceSelection);
-        setSelection(restoredSelection);
+        writeLayer(drag.layerId, drag.sourcePixels, unionRect(drag.sourceBounds, drag.lastBounds));
+        setSelection(cloneSelection(drag.sourceSelection));
         restoreStacks(drag.previousHistory);
       }
       if (cancelled && drag.originalActiveLayerId !== drag.layerId) {
-        const originalLayer = layersRef.current.find((layer) => layer.id === drag.originalActiveLayerId);
-        if (originalLayer) {
-          setActiveLayerId(originalLayer.id);
-          setActiveLayerPixelsState(originalLayer.pixels);
+        if (layersRef.current.some((layer) => layer.id === drag.originalActiveLayerId)) {
+          setActiveLayerId(drag.originalActiveLayerId);
         }
       }
     } else {
       finalizeAction();
     }
     return true;
-  }, [finalizeAction, gridRef, layersRef, restoreStacks, selectionRef, setActiveLayerId, setActiveLayerPixelsState, setMoveLayerPixels, setSelection]);
+  }, [finalizeAction, gridRef, layersRef, restoreStacks, selectionRef, setActiveLayerId, setSelection, writeLayer]);
 
   useEffect(() => {
     if (tool !== "move") {

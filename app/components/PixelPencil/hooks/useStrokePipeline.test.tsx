@@ -1,15 +1,15 @@
 import { act, renderHook } from "@testing-library/react";
 import { useState } from "react";
-import type { SetStateAction } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { LayerEdit } from "../layer-edit";
+import { createBuffer, unpackColor, type DirtyRect } from "../pixel-buffer";
 import type { ToolId } from "../PixelPencilTools";
-import type { BrushShape, PixelValue } from "../PixelPencilTypes";
+import type { BrushShape } from "../PixelPencilTypes";
 import { useStrokePipeline } from "./useStrokePipeline";
 
 const GRID = 8;
 const CELL = 10;
-const TOTAL = GRID * GRID;
 
 const client = (x: number, y: number) => ({ clientX: x * CELL, clientY: y * CELL });
 
@@ -30,8 +30,14 @@ function setup(initial: Partial<Props> = {}) {
       for (const frame of pending) frame(0);
     });
 
-  const pixelsRef = { current: new Array<PixelValue>(TOTAL).fill(null) };
-  const markModified = vi.fn();
+  const buffer = createBuffer(GRID, GRID);
+  /** Each edit's requested rect and the rect the mutation reported changed. */
+  const edits: { layerId: string; rect: DirtyRect; changed: DirtyRect | null }[] = [];
+  const editLayer = vi.fn((layerId: string, rect: DirtyRect, mutate: LayerEdit) => {
+    const changed = mutate(buffer);
+    edits.push({ layerId, rect, changed });
+    return changed;
+  });
   const finalizeAction = vi.fn();
   const setDrawValue = vi.fn();
   const setHoverIndexIfChanged = vi.fn();
@@ -48,21 +54,17 @@ function setup(initial: Partial<Props> = {}) {
     (props: Props) => {
       const [pathPreview, setPathPreview] = useState<Set<number> | null>(null);
       const [dragStartIndex, setDragStartIndex] = useState<number | null>(3);
-      const setActiveLayerPixels = (next: SetStateAction<PixelValue[]>) => {
-        pixelsRef.current = typeof next === "function" ? next(pixelsRef.current) : next;
-      };
       const api = useStrokePipeline({
         gridWidth: GRID,
         gridHeight: GRID,
         ...props,
-        activeLayerPixelsRef: pixelsRef,
-        setActiveLayerPixels,
+        activeLayerId: "layer",
+        editLayer,
         setPathPreview,
         setDragStartIndex,
         setDrawValue,
         setHoverIndexIfChanged,
         resolvePointerFromClientPoint,
-        markModified,
         finalizeAction,
       });
       return { api, pathPreview, dragStartIndex };
@@ -79,9 +81,9 @@ function setup(initial: Partial<Props> = {}) {
   );
 
   const painted = () =>
-    pixelsRef.current.flatMap((value, index) => (value === null ? [] : [index]));
+    Array.from(buffer.data).flatMap((value, index) => (unpackColor(value) === null ? [] : [index]));
 
-  return { hook, pixelsRef, painted, runFrames, markModified, finalizeAction, setDrawValue, setHoverIndexIfChanged };
+  return { hook, buffer, edits, painted, runFrames, finalizeAction, setDrawValue, setHoverIndexIfChanged };
 }
 
 afterEach(() => {
@@ -89,30 +91,50 @@ afterEach(() => {
 });
 
 describe("useStrokePipeline", () => {
-  it("paints the brush footprint and marks the action modified only when pixels change", () => {
-    const { hook, painted, markModified } = setup({ brushSize: 2 });
+  it("paints the brush footprint inside its bounds and reports a change only when pixels change", () => {
+    const { hook, buffer, edits, painted } = setup({ brushSize: 2 });
     act(() => hook.result.current.api.applyBrush(9, "#f00"));
     expect(painted()).toEqual([9, 10, 17, 18]);
-    expect(markModified).toHaveBeenCalledTimes(1);
+    expect(unpackColor(buffer.data[9])).toBe("#ff0000");
+    expect(edits).toEqual([
+      { layerId: "layer", rect: { x: 1, y: 1, width: 2, height: 2 }, changed: { x: 1, y: 1, width: 2, height: 2 } },
+    ]);
 
     act(() => hook.result.current.api.applyBrush(9, "#f00"));
-    expect(markModified).toHaveBeenCalledTimes(1);
+    expect(edits[1].changed).toBeNull();
   });
 
-  it("paints a path with the brush in one update and previews it", () => {
-    const { hook, painted, markModified } = setup();
+  it("clips the brush bounds at the grid edge and erases with null", () => {
+    const { hook, edits, painted } = setup({ brushSize: 3 });
+    act(() => hook.result.current.api.applyBrush(0, "#f00"));
+    expect(edits[0].rect).toEqual({ x: 0, y: 0, width: 2, height: 2 });
+    expect(painted()).toEqual([0, 1, 8, 9]);
+
+    act(() => hook.result.current.api.applyBrush(0, null));
+    expect(painted()).toEqual([]);
+  });
+
+  it("paints a path with the brush in one edit bounded by the path and previews it", () => {
+    const { hook, edits, painted } = setup();
     act(() => hook.result.current.api.applyLinePath([0, 1, 2], "#0f0"));
     expect(painted()).toEqual([0, 1, 2]);
-    expect(markModified).toHaveBeenCalledTimes(1);
+    expect(edits).toHaveLength(1);
+    expect(edits[0].rect).toEqual({ x: 0, y: 0, width: 3, height: 1 });
     expect(hook.result.current.api.buildLinePreview([0, 9])).toEqual(new Set([0, 9]));
 
     act(() => hook.result.current.api.applyLinePath([], "#0f0"));
+    expect(edits).toHaveLength(1);
     act(() => hook.result.current.api.applyLinePath([0, 1, 2], "#0f0"));
-    expect(markModified).toHaveBeenCalledTimes(1);
+    expect(edits[1].changed).toBeNull();
+
+    // The scratch mask is cleared between edits: a later path paints only its own cells.
+    act(() => hook.result.current.api.applyLinePath([16], "#00f"));
+    expect(painted()).toEqual([0, 1, 2, 16]);
+    expect(edits[2].rect).toEqual({ x: 0, y: 2, width: 1, height: 1 });
   });
 
   it("runs a freehand stroke: first cell on press, traced cells on commit, reset on stop", () => {
-    const { hook, painted, finalizeAction, setDrawValue } = setup();
+    const { hook, edits, painted, finalizeAction, setDrawValue } = setup();
     const api = () => hook.result.current.api;
     act(() => api().beginStroke({ index: 0, position: { x: 0.5, y: 0.5 } }, "#f00", true));
     expect(api().isDrawingRef.current).toBe(true);
@@ -129,6 +151,7 @@ describe("useStrokePipeline", () => {
 
     act(() => api().commitStrokeBuffer("#f00"));
     expect(painted()).toEqual([0, 1, 2]);
+    expect(edits[edits.length - 1].rect).toEqual({ x: 0, y: 0, width: 3, height: 1 });
 
     act(() => api().stopStroke());
     expect(api().isDrawingRef.current).toBe(false);

@@ -37,6 +37,7 @@ export function PalettePanel({
       />
       <ColorPalette
         paletteColors={paletteColors}
+        activeColor={activeColor}
         setActiveColor={setActiveColor}
         drawValueRef={drawValueRef}
       />

@@ -1,12 +1,30 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createBuffer, packColor, TRANSPARENT_PIXEL } from "../pixel-buffer";
 import { usePixelExport } from "./usePixelExport";
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+/** Queues animation frames so the test decides when the preview is drawn. */
+function stubFrames() {
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+    frames[id - 1] = () => {};
+  });
+  return () =>
+    act(() => {
+      for (const frame of frames.splice(0, frames.length)) frame(0);
+    });
+}
 
 describe("usePixelExport", () => {
   it("exports only opaque pixels at the selected PNG scale and filename", () => {
+    const runFrames = stubFrames();
     const fillRect = vi.fn();
     const canvases: HTMLCanvasElement[] = [];
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
@@ -28,11 +46,15 @@ describe("usePixelExport", () => {
       downloadName = this.download;
     });
 
+    const composite = createBuffer(2, 1);
+    composite.data[0] = packColor("#123456");
+    composite.data[1] = TRANSPARENT_PIXEL;
+    const compositeRef = { current: composite };
     const { result } = renderHook(() => usePixelExport({
       gridWidth: 2,
       gridHeight: 1,
-      pixels: ["#123456", "transparent"],
-      indexToCoords: (index) => ({ x: index, y: 0 }),
+      compositeRef,
+      compositeVersion: 0,
     }));
 
     act(() => {
@@ -40,6 +62,8 @@ describe("usePixelExport", () => {
       result.current.setExportFilename("  Portrait.PNG  ");
       result.current.open();
     });
+    expect(result.current.previewDataUrl).toBeNull();
+    runFrames();
     expect(result.current.previewDataUrl).toBe("data:image/png;base64,preview");
 
     act(() => result.current.confirmSave());
@@ -54,5 +78,35 @@ describe("usePixelExport", () => {
     expect(createObjectURL).toHaveBeenCalledOnce();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:pixel-art");
     expect(result.current.isOpen).toBe(false);
+    expect(result.current.previewDataUrl).toBeNull();
+  });
+
+  it("redraws the open preview from the composite when its version changes", () => {
+    const runFrames = stubFrames();
+    const fillStyles: string[] = [];
+    const context = {
+      fillRect: vi.fn(() => fillStyles.push(context.fillStyle)),
+      imageSmoothingEnabled: true,
+      fillStyle: "",
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context as unknown as CanvasRenderingContext2D);
+    let urls = 0;
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockImplementation(() => `data:image/png;base64,${++urls}`);
+
+    const compositeRef = { current: createBuffer(1, 1) };
+    const { result, rerender } = renderHook(
+      ({ compositeVersion }) => usePixelExport({ gridWidth: 1, gridHeight: 1, compositeRef, compositeVersion }),
+      { initialProps: { compositeVersion: 0 } },
+    );
+    act(() => result.current.open());
+    runFrames();
+    expect(result.current.previewDataUrl).toBe("data:image/png;base64,1");
+    expect(fillStyles).toEqual([]);
+
+    compositeRef.current.data[0] = packColor("#abcdef");
+    rerender({ compositeVersion: 1 });
+    runFrames();
+    expect(result.current.previewDataUrl).toBe("data:image/png;base64,2");
+    expect(fillStyles).toEqual(["#abcdef"]);
   });
 });

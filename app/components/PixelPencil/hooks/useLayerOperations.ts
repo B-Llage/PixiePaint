@@ -1,24 +1,27 @@
 import { useCallback } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 
-import type { Layer, PixelValue } from "../PixelPencilTypes";
+import { createBuffer, type PixelBuffer } from "../pixel-buffer";
+import type { Layer } from "../PixelPencilTypes";
 import { generateLayerName } from "../pixel-operations";
 
 export const createLayerId = () =>
   `layer-${Math.random().toString(36).slice(2, 7)}${Date.now().toString(36)}`;
 
 export type LayerOperationsOptions = {
-  totalCells: number;
+  gridWidth: number;
+  gridHeight: number;
   layersRef: RefObject<Layer[]>;
   setLayers: (next: SetStateAction<Layer[]>) => Layer[];
   activeLayerId: string;
   setActiveLayerId: (id: string) => void;
   setPathPreview: Dispatch<SetStateAction<Set<number> | null>>;
   setHoverIndexIfChanged: (next: number | null) => void;
-  /** Records a history snapshot without ending an action in progress (rename). */
-  recordSnapshot: () => void;
-  /** Records a history snapshot for a one-shot change and ends any action in progress. */
-  commitSnapshot: () => void;
+  /**
+   * Records a one-shot layer-list change. `apply` performs it and returns the buffers it removed
+   * or replaced, keyed by layer id; ends any pixel action in progress.
+   */
+  recordStructureChange: (apply: () => Map<string, PixelBuffer> | void) => void;
 };
 
 export type LayerOperationsApi = {
@@ -36,35 +39,37 @@ export type LayerOperationsApi = {
 };
 
 /**
- * The layer panel's operations. Each structural change records a history
- * snapshot first; selecting a layer does not. Changes that move the active
- * layer also drop the hover cell and any path preview.
+ * The layer panel's operations. Each structural change runs inside one
+ * `recordStructureChange` call; selecting a layer does not record history.
+ * Deleting a layer hands its buffer to history so undo can bring it back.
+ * Changes that move the active layer also drop the hover cell and any path
+ * preview.
  */
 export function useLayerOperations({
-  totalCells,
+  gridWidth,
+  gridHeight,
   layersRef,
   setLayers,
   activeLayerId,
   setActiveLayerId,
   setPathPreview,
   setHoverIndexIfChanged,
-  recordSnapshot,
-  commitSnapshot,
+  recordStructureChange,
 }: LayerOperationsOptions): LayerOperationsApi {
   const createLayer = useCallback(() => {
-    commitSnapshot();
-    const newLayer: Layer = {
-      id: createLayerId(),
-      name: generateLayerName(layersRef.current),
-      pixels: new Array(totalCells).fill(null) as PixelValue[],
-      visible: true,
-    };
-    const nextLayers = [...layersRef.current, newLayer];
-    setLayers(nextLayers);
-    setActiveLayerId(newLayer.id);
+    recordStructureChange(() => {
+      const newLayer: Layer = {
+        id: createLayerId(),
+        name: generateLayerName(layersRef.current),
+        pixels: createBuffer(gridWidth, gridHeight),
+        visible: true,
+      };
+      setLayers([...layersRef.current, newLayer]);
+      setActiveLayerId(newLayer.id);
+    });
     setPathPreview(null);
     setHoverIndexIfChanged(null);
-  }, [commitSnapshot, layersRef, setActiveLayerId, setHoverIndexIfChanged, setLayers, setPathPreview, totalCells]);
+  }, [gridHeight, gridWidth, layersRef, recordStructureChange, setActiveLayerId, setHoverIndexIfChanged, setLayers, setPathPreview]);
 
   const deleteLayer = useCallback(
     (layerId: string) => {
@@ -72,12 +77,11 @@ export function useLayerOperations({
       if (currentLayers.length <= 1) {
         return;
       }
-      if (!currentLayers.some((layer) => layer.id === layerId)) {
+      const removedLayer = currentLayers.find((layer) => layer.id === layerId);
+      if (!removedLayer) {
         return;
       }
-      commitSnapshot();
       const nextLayers = currentLayers.filter((layer) => layer.id !== layerId);
-      if (!nextLayers.length) return;
       let nextActiveId = activeLayerId;
       if (
         layerId === activeLayerId ||
@@ -85,12 +89,15 @@ export function useLayerOperations({
       ) {
         nextActiveId = nextLayers[nextLayers.length - 1].id;
       }
-      setLayers(nextLayers);
-      setActiveLayerId(nextActiveId);
+      recordStructureChange(() => {
+        setLayers(nextLayers);
+        setActiveLayerId(nextActiveId);
+        return new Map([[layerId, removedLayer.pixels]]);
+      });
       setPathPreview(null);
       setHoverIndexIfChanged(null);
     },
-    [activeLayerId, commitSnapshot, layersRef, setActiveLayerId, setHoverIndexIfChanged, setLayers, setPathPreview],
+    [activeLayerId, layersRef, recordStructureChange, setActiveLayerId, setHoverIndexIfChanged, setLayers, setPathPreview],
   );
 
   const renameLayer = useCallback(
@@ -100,13 +107,13 @@ export function useLayerOperations({
       const layer = currentLayers.find((item) => item.id === layerId);
       if (!layer || !trimmedName || layer.name === trimmedName) return;
 
-      recordSnapshot();
-      const nextLayers = currentLayers.map((item) =>
-        item.id === layerId ? { ...item, name: trimmedName } : item,
-      );
-      setLayers(nextLayers);
+      recordStructureChange(() => {
+        setLayers(
+          currentLayers.map((item) => (item.id === layerId ? { ...item, name: trimmedName } : item)),
+        );
+      });
     },
-    [layersRef, recordSnapshot, setLayers],
+    [layersRef, recordStructureChange, setLayers],
   );
 
   const toggleLayerVisibility = useCallback(
@@ -114,13 +121,15 @@ export function useLayerOperations({
       if (!layersRef.current.some((layer) => layer.id === layerId)) {
         return;
       }
-      commitSnapshot();
-      const nextLayers = layersRef.current.map((layer) =>
-        layer.id === layerId ? { ...layer, visible: !layer.visible } : layer,
-      );
-      setLayers(nextLayers);
+      recordStructureChange(() => {
+        setLayers(
+          layersRef.current.map((layer) =>
+            layer.id === layerId ? { ...layer, visible: !layer.visible } : layer,
+          ),
+        );
+      });
     },
-    [commitSnapshot, layersRef, setLayers],
+    [layersRef, recordStructureChange, setLayers],
   );
 
   const reorderLayers = useCallback(
@@ -135,13 +144,14 @@ export function useLayerOperations({
       ) {
         return;
       }
-      commitSnapshot();
-      const nextLayers = [...currentLayers];
-      const [moved] = nextLayers.splice(fromIndex, 1);
-      nextLayers.splice(toIndex, 0, moved);
-      setLayers(nextLayers);
+      recordStructureChange(() => {
+        const nextLayers = [...currentLayers];
+        const [moved] = nextLayers.splice(fromIndex, 1);
+        nextLayers.splice(toIndex, 0, moved);
+        setLayers(nextLayers);
+      });
     },
-    [commitSnapshot, layersRef, setLayers],
+    [layersRef, recordStructureChange, setLayers],
   );
 
   const selectLayer = useCallback(

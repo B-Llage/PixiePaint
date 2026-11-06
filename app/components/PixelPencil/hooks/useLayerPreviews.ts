@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
+import { unpackColor } from "../pixel-buffer";
 import type { Layer } from "../PixelPencilTypes";
 
 const LAYER_PREVIEW_MAX_SIZE = 64; // px, longest side of a layer thumbnail
@@ -15,11 +16,15 @@ const NO_PREVIEWS: Record<string, string> = {};
  * frame is pending, a layer that still exists keeps its previous thumbnail and
  * a new one has none. An empty grid or no layers yields an empty map without
  * scheduling a frame.
+ *
+ * Layer buffers are edited in place, so the layers array alone does not reveal
+ * pixel edits: the caller bumps `previewVersion` when thumbnails should catch up.
  */
 export function useLayerPreviews(
   layers: readonly Layer[],
   gridWidth: number,
   gridHeight: number,
+  previewVersion: number,
 ): Record<string, string> {
   const [generated, setGenerated] = useState<Record<string, string>>(NO_PREVIEWS);
   const hasArtwork = layers.length > 0 && gridWidth > 0 && gridHeight > 0;
@@ -38,7 +43,7 @@ export function useLayerPreviews(
       cancelled = true;
       window.cancelAnimationFrame(frame);
     };
-  }, [gridHeight, gridWidth, hasArtwork, layers]);
+  }, [gridHeight, gridWidth, hasArtwork, layers, previewVersion]);
 
   return useMemo(() => {
     if (!hasArtwork) return NO_PREVIEWS;
@@ -85,8 +90,9 @@ function renderLayerPreviews(
   for (const layer of layers) {
     drawCheckerboard();
     ctx.globalAlpha = layer.visible ? 1 : 0.4;
-    for (let index = 0; index < layer.pixels.length; index += 1) {
-      const color = layer.pixels[index];
+    const { data } = layer.pixels;
+    for (let index = 0; index < data.length; index += 1) {
+      const color = unpackColor(data[index]);
       if (color === null || color === "transparent") continue;
       ctx.fillStyle = color;
       ctx.fillRect((index % gridWidth) * scale, Math.floor(index / gridWidth) * scale, scale, scale);

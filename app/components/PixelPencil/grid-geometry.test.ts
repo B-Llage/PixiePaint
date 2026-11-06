@@ -4,7 +4,6 @@ import {
   brushBounds,
   clearMaskRect,
   collectFillMask,
-  collectFillRegion,
   computeBrushIndices,
   computeLineIndices,
   computeShapeCells,
@@ -188,51 +187,6 @@ describe("traceWorldSegment", () => {
     const cells = traceWorldSegment(huge, { x: 0.5, y: 0.5 }, { x: 9.5, y: 0.5 + MAX_SEGMENT_STEPS * 10 });
     expect(cells.length).toBeGreaterThan(0);
     expect(traceWorldSegment(huge, { x: 0.5, y: 0.5 }, { x: Infinity, y: 0.5 })).toEqual([]);
-  });
-});
-
-describe("collectFillRegion", () => {
-  const pixels: PixelValue[] = [
-    "#a", "#a", null, "#b", "#b",
-    "#a", null, null, "#b", null,
-    null, null, "#c", null, null,
-    "#b", null, null, null, "#a",
-    "#b", "#b", null, "#a", "#a",
-  ];
-
-  it("collects the four-connected region sharing the start cell's value", () => {
-    expect(sorted(collectFillRegion(pixels, at(0, 0), 5, 5))).toEqual([at(0, 0), at(1, 0), at(0, 1)]);
-    expect(sorted(collectFillRegion(pixels, at(4, 4), 5, 5))).toEqual([at(4, 3), at(3, 4), at(4, 4)]);
-  });
-
-  it("does not leak across diagonals or into other colors", () => {
-    const region = collectFillRegion(pixels, at(3, 0), 5, 5);
-    expect(sorted(region)).toEqual([at(3, 0), at(4, 0), at(3, 1)]);
-    expect(region.has(at(4, 3))).toBe(false);
-  });
-
-  it("fills the connected empty region without crossing painted cells", () => {
-    const empty = sorted(collectFillRegion(pixels, at(2, 0), 5, 5));
-    expect(empty).toContain(at(2, 0));
-    expect(empty).toContain(at(1, 1));
-    expect(empty).toContain(at(3, 3));
-    expect(empty).not.toContain(at(2, 2));
-    expect(empty).not.toContain(at(0, 0));
-  });
-
-  it("returns just the start cell when it is isolated", () => {
-    expect(Array.from(collectFillRegion(pixels, at(2, 2), 5, 5))).toEqual([at(2, 2)]);
-  });
-
-  it("returns every cell of a uniformly filled grid", () => {
-    const solid: PixelValue[] = new Array(9).fill("#fff");
-    expect(collectFillRegion(solid, 4, 3, 3).size).toBe(9);
-  });
-
-  it("does not mutate the source pixels", () => {
-    const copy = [...pixels];
-    collectFillRegion(pixels, at(0, 0), 5, 5);
-    expect(pixels).toEqual(copy);
   });
 });
 

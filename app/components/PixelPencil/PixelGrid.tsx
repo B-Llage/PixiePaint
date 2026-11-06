@@ -17,6 +17,7 @@ import {
 import { PaletteColor, PixelValue, SelectionRect, SelectionState } from "./PixelPencilTypes";
 import { clampPan, getPanBounds, includePanOffset } from "./canvas-pan";
 import { checkerboardStyle } from "./checkerboard";
+import { unpackColor } from "./pixel-buffer";
 
 interface PixelGridProps {
   gridWidth: number;
@@ -884,17 +885,20 @@ export function PixelGrid({
                 style={getSelectionStyle(selectionOverlay.rect, selectionOverlay.offset)}
               />
               {selectionOverlay.isFloating &&
-                selectionOverlay.pixels.map((pixel, idx) => {
-                  if (pixel.color === null) return null;
+                Array.from(selectionOverlay.data, (value, idx) => {
+                  const color = unpackColor(value);
+                  if (color === null) return null;
+                  const relX = idx % selectionOverlay.rect.width;
+                  const relY = Math.floor(idx / selectionOverlay.rect.width);
                   const absX =
-                    selectionOverlay.rect.x + selectionOverlay.offset.dx + pixel.relX;
+                    selectionOverlay.rect.x + selectionOverlay.offset.dx + relX;
                   const absY =
-                    selectionOverlay.rect.y + selectionOverlay.offset.dy + pixel.relY;
+                    selectionOverlay.rect.y + selectionOverlay.offset.dy + relY;
                   const left =
                     absX * displayCellSize - scrollOriginX + renderOffsetX;
                   const top =
                     absY * displayCellSize - scrollOriginY + renderOffsetY;
-                  const isTransparent = pixel.color === "transparent";
+                  const isTransparent = color === "transparent";
                   return (
                     <div
                       key={`${absX}-${absY}-${idx}`}
@@ -906,7 +910,7 @@ export function PixelGrid({
                         height: displayCellSize,
                         ...(isTransparent
                           ? { backgroundColor: "transparent", ...checkerboardStyle(6, "rgba(0,0,0,0.2)") }
-                          : { backgroundColor: pixel.color }),
+                          : { backgroundColor: color }),
                       }}
                     />
                   );

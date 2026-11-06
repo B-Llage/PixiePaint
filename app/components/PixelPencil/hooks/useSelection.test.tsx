@@ -1,10 +1,11 @@
 import { act, fireEvent, renderHook } from "@testing-library/react";
 import { useState } from "react";
-import type { SetStateAction } from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import type { LayerEdit } from "../layer-edit";
+import { createBuffer, packColor, unpackColor, type DirtyRect, type PixelBuffer } from "../pixel-buffer";
 import type { ToolId } from "../PixelPencilTools";
-import type { PixelValue } from "../PixelPencilTypes";
+import type { Layer, SelectionState } from "../PixelPencilTypes";
 import { useSelectionGestures, useSelectionState } from "./useSelection";
 
 const GRID = 4;
@@ -30,13 +31,29 @@ function makeCanvas() {
   };
 }
 
-function setup(initial: { pixels?: PixelValue[]; tool?: ToolId } = {}) {
+const A = packColor("#aaaaaa");
+const B = packColor("#bbbbbb");
+const C = packColor("#cccccc");
+
+const selectionOf = (rect: DirtyRect, values: number[] = []): SelectionState => {
+  const data = new Uint32Array(rect.width * rect.height);
+  data.set(values);
+  return { rect, offset: { dx: 0, dy: 0 }, data, isFloating: false };
+};
+
+function setup(initial: { pixels?: PixelBuffer; tool?: ToolId } = {}) {
   const canvas = makeCanvas();
   const gridRef = { current: canvas as unknown as HTMLCanvasElement };
   const wrapper = document.createElement("div");
   document.body.appendChild(wrapper);
   const gridWrapperRef = { current: wrapper };
-  const pixelsRef = { current: initial.pixels ?? new Array<PixelValue>(GRID * GRID).fill(null) };
+  const layer: Layer = { id: "layer", name: "Layer", visible: true, pixels: initial.pixels ?? createBuffer(GRID, GRID) };
+  const pixel = (index: number) => unpackColor(layer.pixels.data[index]);
+  const edits: { layerId: string; rect: DirtyRect }[] = [];
+  const editLayer = (layerId: string, rect: DirtyRect, mutate: LayerEdit) => {
+    edits.push({ layerId, rect });
+    return mutate(layer.pixels);
+  };
   const beginAction = vi.fn();
   const finalizeAction = vi.fn();
   const resolvePointerFromClientPoint = (clientX: number, clientY: number) => {
@@ -50,15 +67,13 @@ function setup(initial: { pixels?: PixelValue[]; tool?: ToolId } = {}) {
   const hook = renderHook(
     ({ tool }: { tool: ToolId }) => {
       const [pathPreview, setPathPreview] = useState<Set<number> | null>(new Set([0]));
-      const setActiveLayerPixels = (next: SetStateAction<PixelValue[]>) => {
-        pixelsRef.current = typeof next === "function" ? next(pixelsRef.current) : next;
-      };
       const state = useSelectionState({
         gridWidth: GRID,
         gridHeight: GRID,
         gridRef,
-        activeLayerPixelsRef: pixelsRef,
-        setActiveLayerPixels,
+        getActiveLayer: () => layer,
+        activeLayerId: "layer",
+        editLayer,
         setPathPreview,
       });
       const gestures = useSelectionGestures({
@@ -101,36 +116,57 @@ function setup(initial: { pixels?: PixelValue[]; tool?: ToolId } = {}) {
     return handled;
   };
 
-  return { hook, canvas, wrapper, pixelsRef, beginAction, finalizeAction, pressAt, dragTo, releaseAt };
+  return { hook, canvas, wrapper, layer, pixel, edits, beginAction, finalizeAction, pressAt, dragTo, releaseAt };
 }
 
-const filled = (): PixelValue[] => {
-  const pixels = new Array<PixelValue>(GRID * GRID).fill(null);
-  pixels[0] = "#a";
-  pixels[5] = "#b"; // (1,1)
-  pixels[6] = "#c"; // (2,1)
-  return pixels;
+const filled = (): PixelBuffer => {
+  const buffer = createBuffer(GRID, GRID);
+  buffer.data[0] = A;
+  buffer.data[5] = B; // (1,1)
+  buffer.data[6] = C; // (2,1)
+  return buffer;
 };
 
 describe("useSelectionState", () => {
-  it("captures only non-empty pixels inside the rect and applies or clears them at an offset", () => {
-    const { hook, pixelsRef } = setup({ pixels: filled() });
+  it("captures and applies selection data with clipping at the grid edge", () => {
+    const { hook, layer, pixel, edits } = setup({ pixels: filled() });
     const { captureSelectionPixels, applySelectionToLayer } = hook.result.current.state;
     const captured = captureSelectionPixels({ x: 1, y: 1, width: 2, height: 1 });
-    expect(captured).toEqual([
-      { relX: 0, relY: 0, color: "#b" },
-      { relX: 1, relY: 0, color: "#c" },
-    ]);
+    expect(Array.from(captured)).toEqual([B, C]);
 
-    const selection = { rect: { x: 1, y: 1, width: 2, height: 1 }, offset: { dx: 0, dy: 0 }, pixels: captured, isFloating: false };
+    // Cells of a rect that hang off the grid capture as empty.
+    expect(Array.from(captureSelectionPixels({ x: 1, y: 3, width: 2, height: 2 }))).toEqual([0, 0, 0, 0]);
+    const other = createBuffer(GRID, GRID);
+    other.data[3 * GRID + 3] = A;
+    expect(Array.from(captureSelectionPixels({ x: 3, y: 3, width: 2, height: 2 }, other))).toEqual([A, 0, 0, 0]);
+
+    const selection = { ...selectionOf({ x: 1, y: 1, width: 2, height: 1 }), data: captured };
     act(() => applySelectionToLayer(selection, { dx: 0, dy: 0 }, "clear"));
-    expect(pixelsRef.current[5]).toBeNull();
-    expect(pixelsRef.current[6]).toBeNull();
+    expect(pixel(5)).toBeNull();
+    expect(pixel(6)).toBeNull();
+    expect(edits[edits.length - 1]).toEqual({ layerId: "layer", rect: { x: 1, y: 1, width: 2, height: 1 } });
 
-    // Applying at an offset that pushes one pixel off-grid writes only the in-bounds one.
+    // Applying at an offset that pushes one pixel off-grid writes only the in-bounds one,
+    // and the edit is bounded by the shifted rect clipped to the grid.
     act(() => applySelectionToLayer(selection, { dx: 2, dy: 1 }, "apply"));
-    expect(pixelsRef.current[2 * GRID + 3]).toBe("#b");
-    expect(pixelsRef.current.filter((value) => value === "#c")).toHaveLength(0);
+    expect(pixel(2 * GRID + 3)).toBe("#bbbbbb");
+    expect(Array.from(layer.pixels.data).filter((value) => value === C)).toHaveLength(0);
+    expect(edits[edits.length - 1].rect).toEqual({ x: 3, y: 2, width: 1, height: 1 });
+
+    // Empty selection cells are left alone by both modes.
+    layer.pixels.data[2 * GRID + 3] = A;
+    const sparse = selectionOf({ x: 2, y: 2, width: 2, height: 1 }, [B, 0]);
+    act(() => applySelectionToLayer(sparse, { dx: 0, dy: 0 }, "apply"));
+    expect(pixel(2 * GRID + 2)).toBe("#bbbbbb");
+    expect(pixel(2 * GRID + 3)).toBe("#aaaaaa");
+    act(() => applySelectionToLayer(sparse, { dx: 0, dy: 0 }, "clear"));
+    expect(pixel(2 * GRID + 2)).toBeNull();
+    expect(pixel(2 * GRID + 3)).toBe("#aaaaaa");
+
+    // A selection pushed entirely off the grid makes no edit.
+    const editCount = edits.length;
+    act(() => applySelectionToLayer(selection, { dx: 5, dy: 0 }, "apply"));
+    expect(edits).toHaveLength(editCount);
   });
 
   it("normalizes rects to the grid and clamps offsets so the selection stays on it", () => {
@@ -140,7 +176,7 @@ describe("useSelectionState", () => {
 
     const rect = { x: 1, y: 1, width: 2, height: 2 };
     expect(clampSelectionOffset(rect, { dx: -10, dy: 10 })).toEqual({ dx: -2, dy: 2 });
-    const selection = { rect, offset: { dx: 1, dy: 0 }, pixels: [], isFloating: false };
+    const selection = { ...selectionOf(rect), offset: { dx: 1, dy: 0 } };
     expect(selectionContainsCell(selection, 2, 1)).toBe(true);
     expect(selectionContainsCell(selection, 1, 1)).toBe(false);
   });
@@ -151,7 +187,7 @@ describe("useSelectionState", () => {
     expect(hook.result.current.state.gestureRef.current.draftOrigin).toEqual({ x: 0, y: 0 });
     expect(canvas.isCaptured()).toBe(1);
 
-    const restored = { rect: { x: 2, y: 2, width: 1, height: 1 }, offset: { dx: 0, dy: 0 }, pixels: [], isFloating: false };
+    const restored = selectionOf({ x: 2, y: 2, width: 1, height: 1 });
     act(() => hook.result.current.state.restoreSelection(restored));
     expect(hook.result.current.state.selection).toEqual(restored);
     expect(hook.result.current.state.selection).not.toBe(restored);
@@ -175,15 +211,9 @@ describe("useSelectionGestures", () => {
 
     expect(releaseAt(2, 3)).toBe(true);
     expect(hook.result.current.state.selectionPreviewRect).toBeNull();
-    expect(hook.result.current.state.selection).toEqual({
-      rect: { x: 1, y: 1, width: 2, height: 3 },
-      offset: { dx: 0, dy: 0 },
-      pixels: [
-        { relX: 0, relY: 0, color: "#b" },
-        { relX: 1, relY: 0, color: "#c" },
-      ],
-      isFloating: false,
-    });
+    expect(hook.result.current.state.selection).toEqual(
+      selectionOf({ x: 1, y: 1, width: 2, height: 3 }, [B, C, 0, 0, 0, 0]),
+    );
     expect(canvas.isCaptured()).toBeNull();
   });
 
@@ -214,7 +244,7 @@ describe("useSelectionGestures", () => {
   });
 
   it("drags a selection with pixels inside one history action and commits it at the new place", () => {
-    const { hook, pixelsRef, beginAction, finalizeAction, pressAt, dragTo, releaseAt } = setup({ pixels: filled() });
+    const { hook, pixel, beginAction, finalizeAction, pressAt, dragTo, releaseAt } = setup({ pixels: filled() });
     pressAt(1, 1);
     releaseAt(2, 1);
     expect(beginAction).not.toHaveBeenCalled();
@@ -222,8 +252,8 @@ describe("useSelectionGestures", () => {
     pressAt(1, 1);
     expect(beginAction).toHaveBeenCalledTimes(1);
     expect(hook.result.current.state.selection?.isFloating).toBe(true);
-    expect(pixelsRef.current[5]).toBeNull();
-    expect(pixelsRef.current[6]).toBeNull();
+    expect(pixel(5)).toBeNull();
+    expect(pixel(6)).toBeNull();
 
     dragTo(1, 3);
     expect(hook.result.current.state.selection?.offset).toEqual({ dx: 0, dy: 2 });
@@ -239,7 +269,7 @@ describe("useSelectionGestures", () => {
       offset: { dx: 0, dy: 0 },
       isFloating: false,
     });
-    expect(pixelsRef.current[3 * GRID + 3]).toBe("#b");
+    expect(pixel(3 * GRID + 3)).toBe("#bbbbbb");
   });
 
   it("dragging an empty selection opens no history action", () => {
@@ -254,12 +284,12 @@ describe("useSelectionGestures", () => {
   });
 
   it("cancelling a floating selection applies its pixels where they are and ends the action", () => {
-    const { hook, pixelsRef, finalizeAction, pressAt, dragTo, releaseAt } = setup({ pixels: filled() });
+    const { hook, pixel, finalizeAction, pressAt, dragTo, releaseAt } = setup({ pixels: filled() });
     pressAt(1, 1);
     releaseAt(2, 1);
     pressAt(1, 1);
     dragTo(1, 2);
-    expect(pixelsRef.current[5]).toBeNull();
+    expect(pixel(5)).toBeNull();
 
     let cancelled = false;
     act(() => {
@@ -267,7 +297,7 @@ describe("useSelectionGestures", () => {
     });
     expect(cancelled).toBe(true);
     expect(hook.result.current.state.selection).toBeNull();
-    expect(pixelsRef.current[2 * GRID + 1]).toBe("#b");
+    expect(pixel(2 * GRID + 1)).toBe("#bbbbbb");
     expect(finalizeAction).toHaveBeenCalledTimes(1);
 
     act(() => {
@@ -277,13 +307,13 @@ describe("useSelectionGestures", () => {
   });
 
   it("deletes the selected pixels inside a history action", () => {
-    const { hook, pixelsRef, beginAction, finalizeAction, pressAt, releaseAt } = setup({ pixels: filled() });
+    const { hook, pixel, beginAction, finalizeAction, pressAt, releaseAt } = setup({ pixels: filled() });
     pressAt(1, 1);
     releaseAt(2, 1);
     act(() => hook.result.current.gestures.deleteSelection());
-    expect(pixelsRef.current[5]).toBeNull();
-    expect(pixelsRef.current[6]).toBeNull();
-    expect(pixelsRef.current[0]).toBe("#a");
+    expect(pixel(5)).toBeNull();
+    expect(pixel(6)).toBeNull();
+    expect(pixel(0)).toBe("#aaaaaa");
     expect(beginAction).toHaveBeenCalledTimes(1);
     expect(finalizeAction).toHaveBeenCalledTimes(1);
     expect(hook.result.current.state.selection).toBeNull();
@@ -293,11 +323,13 @@ describe("useSelectionGestures", () => {
     const { hook } = setup({ pixels: filled() });
     act(() => hook.result.current.gestures.selectEntireCanvas());
     expect(hook.result.current.state.selection?.rect).toEqual({ x: 0, y: 0, width: GRID, height: GRID });
-    expect(hook.result.current.state.selection?.pixels).toHaveLength(3);
+    const data = Array.from(hook.result.current.state.selection?.data ?? []);
+    expect(data).toHaveLength(GRID * GRID);
+    expect(data.filter((value) => value !== 0)).toEqual([A, B, C]);
   });
 
   it("handles Delete, Escape and Ctrl/Cmd+A on the window but not inside inputs", () => {
-    const { hook, pixelsRef, pressAt, releaseAt } = setup({ pixels: filled() });
+    const { hook, pixel, pressAt, releaseAt } = setup({ pixels: filled() });
     fireEvent.keyDown(window, { key: "a", ctrlKey: true });
     expect(hook.result.current.state.selection?.rect.width).toBe(GRID);
 
@@ -309,10 +341,10 @@ describe("useSelectionGestures", () => {
     const input = document.createElement("input");
     document.body.appendChild(input);
     fireEvent.keyDown(input, { key: "Delete" });
-    expect(pixelsRef.current[5]).toBe("#b");
+    expect(pixel(5)).toBe("#bbbbbb");
 
     fireEvent.keyDown(window, { key: "Delete" });
-    expect(pixelsRef.current[5]).toBeNull();
+    expect(pixel(5)).toBeNull();
     expect(hook.result.current.state.selection).toBeNull();
     input.remove();
   });

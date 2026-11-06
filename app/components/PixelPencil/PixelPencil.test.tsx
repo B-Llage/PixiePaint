@@ -189,6 +189,82 @@ describe("PixelPencil move tool", () => {
   });
 });
 
+describe("PixelPencil picker", () => {
+  it("picking a color highlights its palette swatch", async () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    const swatches = () => screen.getAllByRole("button", { name: /^Use color / });
+    const swatch = () => screen.getByRole("button", { name: "Use color #1f2937" });
+
+    fireEvent.click(swatch());
+    fireEvent.click(screen.getByRole("button", { name: "Paint origin" }));
+    await waitFor(() => expect(firstTwoPixels()[0]).toBe("#1f2937"));
+
+    // Switch away so only the picker can bring the swatch back.
+    fireEvent.click(screen.getByRole("button", { name: "Use color #000000" }));
+    expect(swatch().getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.click(screen.getByRole("button", { name: "Picker" }));
+    fireEvent.click(screen.getByRole("button", { name: "Paint origin" }));
+    await waitFor(() => expect(swatch().getAttribute("aria-pressed")).toBe("true"));
+    const pressed = swatches().filter((button) => button.getAttribute("aria-pressed") === "true");
+    expect(pressed).toEqual([swatch()]);
+    // Picking leaves the artwork unchanged.
+    expect(paintedCells()).toEqual([0]);
+  });
+});
+
+describe("PixelPencil history", () => {
+  it("undoes and redoes a bucket fill, a clear, and adding and deleting a layer", async () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    const click = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+    const center = 4 * 32 + 4;
+
+    click("Paint origin");
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+
+    // The bucket fills the empty region around the painted origin.
+    click("Bucket");
+    click("Paint center");
+    await waitFor(() => expect(paintedCells()).toHaveLength(32 * 32));
+    click("Undo");
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+    click("Redo");
+    await waitFor(() => expect(paintedCells()).toHaveLength(32 * 32));
+    click("Undo");
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+
+    click("Clear");
+    click("Yes, clear");
+    await waitFor(() => expect(paintedCells()).toEqual([]));
+    click("Undo");
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+
+    click("Add Layer");
+    click("Pencil");
+    click("Paint center");
+    await waitFor(() => expect(paintedCells()).toEqual([0, center]));
+    const layerTwoRow = () => screen.getByRole("button", { name: "Select Layer 2" }).closest("li") as HTMLElement;
+    fireEvent.click(within(layerTwoRow()).getByRole("button", { name: "Delete layer" }));
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+    expect(screen.queryByRole("button", { name: "Select Layer 2" })).toBeNull();
+
+    click("Undo");
+    await waitFor(() => expect(paintedCells()).toEqual([0, center]));
+    click("Undo");
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+    expect(screen.getByRole("button", { name: "Select Layer 2" })).not.toBeNull();
+    click("Undo");
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Select Layer 2" })).toBeNull());
+
+    // Redoing the added layer brings it back blank; redoing the stroke repaints it.
+    click("Redo");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Select Layer 2" })).not.toBeNull());
+    expect(paintedCells()).toEqual([0]);
+    click("Redo");
+    await waitFor(() => expect(paintedCells()).toEqual([0, center]));
+  });
+});
+
 describe("PixelPencil grid resize", () => {
   const undoButton = () => screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement;
   const gridWidth = () => Number(screen.getByTestId("grid-width").textContent);

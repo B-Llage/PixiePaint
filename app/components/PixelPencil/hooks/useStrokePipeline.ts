@@ -2,9 +2,15 @@ import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 
 import {
+  brushBounds,
+  clearMaskRect,
   computeBrushIndices as computeBrushIndicesOnGrid,
+  createMask,
+  stampCells,
   traceWorldSegment as traceWorldSegmentOnGrid,
 } from "../grid-geometry";
+import type { EditLayer } from "../layer-edit";
+import { fillCells, fillMask, toPackedValue, type DirtyRect } from "../pixel-buffer";
 import type { ToolId } from "../PixelPencilTools";
 import type { BrushShape, PixelValue } from "../PixelPencilTypes";
 
@@ -20,8 +26,10 @@ export type StrokePipelineOptions = {
   brushSize: number;
   brushShape: BrushShape;
   previewToolEffects: boolean;
-  activeLayerPixelsRef: RefObject<PixelValue[]>;
-  setActiveLayerPixels: (next: SetStateAction<PixelValue[]>) => void;
+  /** The layer every brush edit writes to. */
+  activeLayerId: string;
+  /** Writes to a layer through the editor, which records history and recomposites. */
+  editLayer: EditLayer;
   setPathPreview: Dispatch<SetStateAction<Set<number> | null>>;
   setDragStartIndex: Dispatch<SetStateAction<number | null>>;
   setDrawValue: (value: PixelValue) => void;
@@ -32,7 +40,6 @@ export type StrokePipelineOptions = {
     clientY: number,
     options?: { clamp?: boolean },
   ) => StrokePointer | null;
-  markModified: () => void;
   finalizeAction: () => void;
 };
 
@@ -45,9 +52,9 @@ export type StrokePipelineApi = {
   lastPaintedIndexRef: RefObject<number | null>;
   /** The brush footprint around a cell for the current size and shape. */
   computeBrushIndices: (centerIndex: number) => number[];
-  /** Paints the brush footprint at a cell and marks the action modified if anything changed. */
+  /** Paints the brush footprint at a cell through one `editLayer` call bounded by the brush square. */
   applyBrush: (index: number, value: PixelValue) => void;
-  /** Paints the brush footprint along a path in one update. */
+  /** Paints the brush footprint along a path in one `editLayer` call bounded by the stamped cells. */
   applyLinePath: (path: number[], value: PixelValue) => void;
   /** The preview cells for a path drawn with the current brush. */
   buildLinePreview: (path: number[]) => Set<number>;
@@ -95,14 +102,13 @@ export function useStrokePipeline({
   brushSize,
   brushShape,
   previewToolEffects,
-  activeLayerPixelsRef,
-  setActiveLayerPixels,
+  activeLayerId,
+  editLayer,
   setPathPreview,
   setDragStartIndex,
   setDrawValue,
   setHoverIndexIfChanged,
   resolvePointerFromClientPoint,
-  markModified,
   finalizeAction,
 }: StrokePipelineOptions): StrokePipelineApi {
   const isDrawingRef = useRef(false);
@@ -112,6 +118,8 @@ export function useStrokePipeline({
   const activePointerIdRef = useRef<number | null>(null);
   const pointerQueueRef = useRef<WorldPoint[]>([]);
   const pointerRAFRef = useRef<number | null>(null);
+  /** Canvas-sized scratch mask for path and stroke commits; cleared over its bounds after each use. */
+  const scratchMaskRef = useRef<Uint8Array | null>(null);
 
   useEffect(() => {
     const pointerQueue = pointerQueueRef.current;
@@ -132,57 +140,42 @@ export function useStrokePipeline({
 
   const applyBrush = useCallback(
     (index: number, value: PixelValue) => {
-      const indices = computeBrushIndices(index);
-      if (indices.length === 0) return;
+      const grid = { width: gridWidth, height: gridHeight };
+      const rect = brushBounds(grid, index, brushSize);
+      const packed = toPackedValue(value);
+      editLayer(activeLayerId, rect, (buffer) => fillCells(buffer, computeBrushIndices(index), packed));
+    },
+    [activeLayerId, brushSize, computeBrushIndices, editLayer, gridHeight, gridWidth],
+  );
 
-      let changed = false;
-      setActiveLayerPixels((prev) => {
-        const next = [...prev];
-
-        for (const target of indices) {
-          if (next[target] === value) continue;
-          next[target] = value;
-          changed = true;
-        }
-
-        if (!changed) {
-          return prev;
-        }
-
-        return next;
-      });
-
-      if (changed) {
-        markModified();
+  /** Stamps the brush footprint of every cell into the scratch mask and fills it in one edit. */
+  const fillFootprints = useCallback(
+    (cells: Iterable<number>, value: PixelValue) => {
+      const grid = { width: gridWidth, height: gridHeight };
+      let mask = scratchMaskRef.current;
+      if (!mask || mask.length !== gridWidth * gridHeight) {
+        mask = createMask(grid);
+        scratchMaskRef.current = mask;
+      }
+      let bounds: DirtyRect | null = null;
+      for (const cell of cells) {
+        bounds = stampCells(mask, grid, computeBrushIndices(cell), bounds);
+      }
+      if (!bounds) return;
+      const stamped = bounds;
+      const packed = toPackedValue(value);
+      try {
+        editLayer(activeLayerId, stamped, (buffer) => fillMask(buffer, mask, stamped, packed));
+      } finally {
+        clearMaskRect(mask, grid, stamped);
       }
     },
-    [computeBrushIndices, markModified, setActiveLayerPixels],
+    [activeLayerId, computeBrushIndices, editLayer, gridHeight, gridWidth],
   );
 
   const applyLinePath = useCallback(
-    (path: number[], value: PixelValue) => {
-      if (!path.length) return;
-      const current = activeLayerPixelsRef.current;
-      const next = [...current];
-      let changed = false;
-
-      for (const pathIndex of path) {
-        const indices = computeBrushIndices(pathIndex);
-        for (const target of indices) {
-          if (next[target] === value) continue;
-          next[target] = value;
-          changed = true;
-        }
-      }
-
-      if (!changed) {
-        return;
-      }
-
-      markModified();
-      setActiveLayerPixels(next);
-    },
-    [activeLayerPixelsRef, computeBrushIndices, markModified, setActiveLayerPixels],
+    (path: number[], value: PixelValue) => fillFootprints(path, value),
+    [fillFootprints],
   );
 
   const buildLinePreview = useCallback(
@@ -322,31 +315,9 @@ export function useStrokePipeline({
     (value: PixelValue) => {
       const applied = strokeAppliedCellsRef.current;
       if (!applied || applied.size === 0) return;
-      const targetCells = new Set<number>();
-      for (const baseCell of applied) {
-        const indices = computeBrushIndices(baseCell);
-        for (const idx of indices) {
-          targetCells.add(idx);
-        }
-      }
-      if (!targetCells.size) return;
-      setActiveLayerPixels((prev) => {
-        const next = [...prev];
-        let changed = false;
-        targetCells.forEach((idx) => {
-          if (next[idx] !== value) {
-            next[idx] = value;
-            changed = true;
-          }
-        });
-        if (!changed) {
-          return prev;
-        }
-        markModified();
-        return next;
-      });
+      fillFootprints(applied, value);
     },
-    [computeBrushIndices, markModified, setActiveLayerPixels],
+    [fillFootprints],
   );
 
   const clearPointerQueue = useCallback(() => {
