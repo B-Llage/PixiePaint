@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit --incremental false",
     "test": "vitest run",
     "test:watch": "vitest",
+    "bench": "vitest bench --run",
     "check": "npm run lint && npm run typecheck && npm run test"
   },
   "dependencies": {
