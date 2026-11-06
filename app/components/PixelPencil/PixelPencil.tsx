@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, SetStateAction } from "react";
 import {
   BrushShape,
+  Layer,
   PaletteColor,
   PaletteTheme,
   PixelValue,
@@ -26,7 +27,23 @@ import type { SelectedColorStyles } from "./Settings/Tool/SelectedColor";
 import { PixelGrid } from "./PixelGrid";
 import { PixelPencilModals } from "./PixelPencilModals";
 import { LayersPanel } from "./LayersPanel";
-import { composeLayers, translatePixels } from "./pixel-operations";
+import {
+  areLayersEqual,
+  arePixelsEqual,
+  areSelectionsEqual,
+  cloneLayers,
+  cloneSelection,
+  composeLayers,
+  generateLayerName,
+  translatePixels,
+} from "./pixel-operations";
+import {
+  collectFillRegion,
+  computeBrushIndices as computeBrushIndicesOnGrid,
+  computeLineIndices as computeLineIndicesOnGrid,
+  computeShapeCells as computeShapeCellsOnGrid,
+  traceWorldSegment as traceWorldSegmentOnGrid,
+} from "./grid-geometry";
 import { getPanBounds, includePanOffset } from "./canvas-pan";
 import { checkerboardStyle } from "./checkerboard";
 import { useEscapeKey } from "./hooks/useEscapeKey";
@@ -34,8 +51,6 @@ import packageJson from "../../../package.json";
 
 const PALETTE_THEMES: readonly PaletteTheme[] = PixelPencilPalettes;
 
-const RESAMPLE_STEP = 0.5; // cells
-const MAX_SEGMENT_STEPS = 2048;
 const APP_VERSION = packageJson.version;
 // Below Tailwind's `md` breakpoint the Layers and Palette panels become bottom sheets.
 const MOBILE_MEDIA_QUERY = "(max-width: 767px)";
@@ -54,23 +69,6 @@ const HOTKEY_ITEMS = [
   { label: "Redo", key: "Ctrl/Cmd + Shift + Z" },
   { label: "Clear", key: "Ctrl/Cmd + Backspace" },
 ];
-
-const arePixelsEqual = (a: PixelValue[], b: PixelValue[]) => {
-  if (a.length !== b.length) return false;
-  for (let index = 0; index < a.length; index += 1) {
-    if (a[index] !== b[index]) {
-      return false;
-    }
-  }
-  return true;
-};
-
-type Layer = {
-  id: string;
-  name: string;
-  pixels: PixelValue[];
-  visible: boolean;
-};
 
 type LayerSnapshot = {
   layers: Layer[];
@@ -93,87 +91,6 @@ type MoveDrag = {
   previousUndo: LayerSnapshot[];
   previousRedo: LayerSnapshot[];
   actionStarted: boolean;
-};
-
-const cloneLayer = (layer: Layer, totalCells: number): Layer => {
-  const pixels = new Array(totalCells).fill(null) as PixelValue[];
-  const limit = Math.min(totalCells, layer.pixels.length);
-  for (let index = 0; index < limit; index += 1) {
-    pixels[index] = layer.pixels[index] ?? null;
-  }
-  return {
-    ...layer,
-    pixels,
-  };
-};
-
-const cloneLayers = (layers: Layer[], totalCells: number) =>
-  layers.map((layer) => cloneLayer(layer, totalCells));
-
-const cloneSelection = (selection: SelectionState | null): SelectionState | null => {
-  if (!selection) return null;
-  return {
-    rect: { ...selection.rect },
-    offset: { ...selection.offset },
-    pixels: selection.pixels.map((pixel) => ({ ...pixel })),
-    isFloating: selection.isFloating,
-  };
-};
-
-const areSelectionPixelsEqual = (a: SelectionPixel[], b: SelectionPixel[]) => {
-  if (a.length !== b.length) return false;
-  for (let index = 0; index < a.length; index += 1) {
-    const pixelA = a[index];
-    const pixelB = b[index];
-    if (
-      pixelA.relX !== pixelB.relX ||
-      pixelA.relY !== pixelB.relY ||
-      pixelA.color !== pixelB.color
-    ) {
-      return false;
-    }
-  }
-  return true;
-};
-
-const areSelectionsEqual = (a: SelectionState | null, b: SelectionState | null) => {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  return (
-    a.rect.x === b.rect.x &&
-    a.rect.y === b.rect.y &&
-    a.rect.width === b.rect.width &&
-    a.rect.height === b.rect.height &&
-    a.offset.dx === b.offset.dx &&
-    a.offset.dy === b.offset.dy &&
-    a.isFloating === b.isFloating &&
-    areSelectionPixelsEqual(a.pixels, b.pixels)
-  );
-};
-
-const areLayersEqual = (a: Layer[], b: Layer[]) => {
-  if (a.length !== b.length) return false;
-  for (let index = 0; index < a.length; index += 1) {
-    const layerA = a[index];
-    const layerB = b[index];
-    if (
-      layerA.id !== layerB.id ||
-      layerA.name !== layerB.name ||
-      layerA.visible !== layerB.visible ||
-      !arePixelsEqual(layerA.pixels, layerB.pixels)
-    ) {
-      return false;
-    }
-  }
-  return true;
-};
-
-const generateLayerName = (existingLayers: Layer[]) => {
-  let suffix = existingLayers.length + 1;
-  while (existingLayers.some((layer) => layer.name === `Layer ${suffix}`)) {
-    suffix += 1;
-  }
-  return `Layer ${suffix}`;
 };
 
 export function PixelPencil() {
@@ -1277,36 +1194,9 @@ export function PixelPencil() {
   }, [cancelSelection, deleteSelection, selectEntireCanvas]);
 
   const computeBrushIndices = useCallback(
-    (centerIndex: number) => {
-      const centerX = centerIndex % gridWidth;
-      const centerY = Math.floor(centerIndex / gridWidth);
-      const startOffset = -Math.floor((brushSize - 1) / 2);
-      const endOffset = Math.ceil((brushSize - 1) / 2);
-      const indices: number[] = [];
-
-      const circleCenter = (startOffset + endOffset) / 2;
-      const radiusSquared = (brushSize / 2) ** 2;
-
-      const minY = Math.max(startOffset, -centerY);
-      const maxY = Math.min(endOffset, gridHeight - 1 - centerY);
-      const minX = Math.max(startOffset, -centerX);
-      const maxX = Math.min(endOffset, gridWidth - 1 - centerX);
-
-      for (let dy = minY; dy <= maxY; dy += 1) {
-        for (let dx = minX; dx <= maxX; dx += 1) {
-          if (
-            brushShape === "circle" &&
-            (dx - circleCenter) ** 2 + (dy - circleCenter) ** 2 > radiusSquared
-          ) {
-            continue;
-          }
-          indices.push(coordsToIndex(centerX + dx, centerY + dy));
-        }
-      }
-
-      return indices;
-    },
-    [brushShape, brushSize, coordsToIndex, gridHeight, gridWidth],
+    (centerIndex: number) =>
+      computeBrushIndicesOnGrid({ width: gridWidth, height: gridHeight }, centerIndex, brushSize, brushShape),
+    [brushShape, brushSize, gridHeight, gridWidth],
   );
 
   const applyBrush = useCallback(
@@ -1379,43 +1269,9 @@ export function PixelPencil() {
   );
 
   const computeLineIndices = useCallback(
-    (startIndex: number, endIndex: number) => {
-      if (startIndex === endIndex) {
-        return [startIndex];
-      }
-
-      let { x: x0, y: y0 } = indexToCoords(startIndex);
-      const { x: x1, y: y1 } = indexToCoords(endIndex);
-
-      const result: number[] = [];
-
-      const dx = Math.abs(x1 - x0);
-      const dy = Math.abs(y1 - y0);
-      const sx = x0 < x1 ? 1 : -1;
-      const sy = y0 < y1 ? 1 : -1;
-      let err = dx - dy;
-
-      while (true) {
-        if (isInBounds(x0, y0)) {
-          result.push(coordsToIndex(x0, y0));
-        }
-        if (x0 === x1 && y0 === y1) {
-          break;
-        }
-        const e2 = 2 * err;
-        if (e2 > -dy) {
-          err -= dy;
-          x0 += sx;
-        }
-        if (e2 < dx) {
-          err += dx;
-          y0 += sy;
-        }
-      }
-
-      return result;
-    },
-    [coordsToIndex, indexToCoords, isInBounds],
+    (startIndex: number, endIndex: number) =>
+      computeLineIndicesOnGrid({ width: gridWidth, height: gridHeight }, startIndex, endIndex),
+    [gridHeight, gridWidth],
   );
 
   const updateShiftLinePreview = useCallback(
@@ -1485,111 +1341,9 @@ export function PixelPencil() {
   );
 
   const computeShapeCells = useCallback(
-    (startIndex: number, endIndex: number, shape: ShapeKind, filled: boolean) => {
-      const { x: startX, y: startY } = indexToCoords(startIndex);
-      const { x: endX, y: endY } = indexToCoords(endIndex);
-
-      const minX = Math.max(0, Math.min(startX, endX));
-      const maxX = Math.min(gridWidth - 1, Math.max(startX, endX));
-      const minY = Math.max(0, Math.min(startY, endY));
-      const maxY = Math.min(gridHeight - 1, Math.max(startY, endY));
-      const topToBottom = startY <= endY;
-
-      const width = Math.max(1, maxX - minX + 1);
-      const height = Math.max(1, maxY - minY + 1);
-
-      const cells: number[] = [];
-
-      const pushCell = (x: number, y: number) => {
-        if (!isInBounds(x, y)) return;
-        cells.push(coordsToIndex(x, y));
-      };
-
-      const addSquare = () => {
-        for (let y = minY; y <= maxY; y += 1) {
-          for (let x = minX; x <= maxX; x += 1) {
-            pushCell(x, y);
-          }
-        }
-      };
-
-      const addCircle = () => {
-        const centerX = minX + (width - 1) / 2;
-        const centerY = minY + (height - 1) / 2;
-        const radius = Math.max(width, height) / 2;
-        for (let y = minY; y <= maxY; y += 1) {
-          for (let x = minX; x <= maxX; x += 1) {
-            const dx = x - centerX;
-            const dy = y - centerY;
-            if (dx * dx + dy * dy <= radius * radius) {
-              pushCell(x, y);
-            }
-          }
-        }
-      };
-
-      const addTriangle = () => {
-        const effectiveHeight = Math.max(height - 1, 1);
-        const centerX = minX + (width - 1) / 2;
-        if (topToBottom) {
-          for (let y = minY; y <= maxY; y += 1) {
-            const progress = (y - minY) / effectiveHeight;
-            const halfSpan = (width - 1) / 2 * (1 - progress);
-            const left = Math.round(centerX - halfSpan);
-            const right = Math.round(centerX + halfSpan);
-            for (let x = left; x <= right; x += 1) {
-              pushCell(x, y);
-            }
-          }
-        } else {
-          for (let y = maxY; y >= minY; y -= 1) {
-            const progress = (maxY - y) / effectiveHeight;
-            const halfSpan = (width - 1) / 2 * (1 - progress);
-            const left = Math.round(centerX - halfSpan);
-            const right = Math.round(centerX + halfSpan);
-            for (let x = left; x <= right; x += 1) {
-              pushCell(x, y);
-            }
-          }
-        }
-      };
-
-      if (shape === "square") {
-        addSquare();
-      } else if (shape === "circle") {
-        addCircle();
-      } else {
-        addTriangle();
-      }
-
-      if (filled) {
-        return cells;
-      }
-
-      const perimeter = new Set<number>();
-      const cellSet = new Set(cells);
-      const neighborOffsets = [
-        { dx: 1, dy: 0 },
-        { dx: -1, dy: 0 },
-        { dx: 0, dy: 1 },
-        { dx: 0, dy: -1 },
-      ];
-
-      for (const cell of cells) {
-        const { x, y } = indexToCoords(cell);
-        for (const { dx, dy } of neighborOffsets) {
-          const nx = x + dx;
-          const ny = y + dy;
-          if (!isInBounds(nx, ny) || !cellSet.has(coordsToIndex(nx, ny))) {
-            perimeter.add(cell);
-            break;
-          }
-        }
-      }
-
-      return Array.from(perimeter);
-    },
-    [coordsToIndex, gridHeight, gridWidth, indexToCoords, isInBounds],
+    (startIndex: number, endIndex: number, shape: ShapeKind, filled: boolean) =>
+      computeShapeCellsOnGrid({ width: gridWidth, height: gridHeight }, startIndex, endIndex, shape, filled),
+    [gridHeight, gridWidth],
   );
 
   const handleCreateLayer = useCallback(() => {
@@ -1722,44 +1476,9 @@ export function PixelPencil() {
   );
 
   const traceWorldSegment = useCallback(
-    (from: { x: number; y: number }, to: { x: number; y: number }) => {
-      const cells: number[] = [];
-      const dx = to.x - from.x;
-      const dy = to.y - from.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      let steps = distance / RESAMPLE_STEP;
-      if (!Number.isFinite(steps)) {
-        steps = 0;
-      }
-      steps = Math.min(MAX_SEGMENT_STEPS, Math.max(1, Math.ceil(steps)));
-      let previousIndex: number | null = null;
-
-      for (let step = 0; step <= steps; step += 1) {
-        const t = steps === 0 ? 0 : step / steps;
-        const sampleX = from.x + dx * t;
-        const sampleY = from.y + dy * t;
-        const cellX = Math.floor(sampleX);
-        const cellY = Math.floor(sampleY);
-        if (!isInBounds(cellX, cellY)) continue;
-        const currentIndex = coordsToIndex(cellX, cellY);
-        if (previousIndex === null) {
-          cells.push(currentIndex);
-          previousIndex = currentIndex;
-          continue;
-        }
-        if (currentIndex === previousIndex) {
-          continue;
-        }
-        const link = computeLineIndices(previousIndex, currentIndex);
-        for (let pos = 1; pos < link.length; pos += 1) {
-          cells.push(link[pos]);
-        }
-        previousIndex = currentIndex;
-      }
-
-      return cells;
-    },
-    [computeLineIndices, coordsToIndex, isInBounds],
+    (from: { x: number; y: number }, to: { x: number; y: number }) =>
+      traceWorldSegmentOnGrid({ width: gridWidth, height: gridHeight }, from, to),
+    [gridHeight, gridWidth],
   );
 
   const buildPreviewFromAppliedCells = useCallback(
@@ -1854,54 +1573,34 @@ export function PixelPencil() {
     finalizeAction();
   }, [finalizeAction]);
 
-  const floodFill = useCallback((startIndex: number, fillValue: PixelValue) => {
-    let changed = false;
-    setActiveLayerPixels((prev) => {
-      const targetValue = prev[startIndex];
-      if (targetValue === fillValue) {
-        return prev;
-      }
-
-      const next = [...prev];
-      const stack = [startIndex];
-      const visited = new Set<number>();
-
-      while (stack.length) {
-        const index = stack.pop();
-        if (index === undefined || visited.has(index)) continue;
-        visited.add(index);
-
-        if (prev[index] !== targetValue) continue;
-
-        next[index] = fillValue;
-        changed = true;
-
-        const { x, y } = indexToCoords(index);
-
-        const neighbors = [
-          { x: x - 1, y },
-          { x: x + 1, y },
-          { x, y: y - 1 },
-          { x, y: y + 1 },
-        ];
-
-        for (const { x: nx, y: ny } of neighbors) {
-          if (!isInBounds(nx, ny)) continue;
-          stack.push(coordsToIndex(nx, ny));
+  const floodFill = useCallback(
+    (startIndex: number, fillValue: PixelValue) => {
+      let changed = false;
+      setActiveLayerPixels((prev) => {
+        const targetValue = prev[startIndex];
+        if (targetValue === fillValue) {
+          return prev;
         }
+
+        const region = collectFillRegion(prev, startIndex, gridWidth, gridHeight);
+        if (region.size === 0) {
+          return prev;
+        }
+
+        const next = [...prev];
+        for (const index of region) {
+          next[index] = fillValue;
+        }
+        changed = true;
+        return next;
+      });
+
+      if (changed) {
+        actionModifiedRef.current = true;
       }
-
-      if (!changed) {
-        return prev;
-      }
-
-      return next;
-    });
-
-    if (changed) {
-      actionModifiedRef.current = true;
-    }
-  }, [coordsToIndex, indexToCoords, isInBounds, setActiveLayerPixels]);
+    },
+    [gridHeight, gridWidth, setActiveLayerPixels],
+  );
 
   useEffect(() => {
     const handlePointerUp = () => {
@@ -2995,36 +2694,8 @@ export function PixelPencil() {
     const targetColor = activeLayerPixels[hoverIndex];
     if (targetColor === undefined) return null;
 
-    const visited = new Set<number>();
-    const stack = [hoverIndex];
-    const region = new Set<number>();
-
-    while (stack.length) {
-      const index = stack.pop();
-      if (index === undefined || visited.has(index)) continue;
-      visited.add(index);
-
-      if (activeLayerPixels[index] !== targetColor) continue;
-
-      region.add(index);
-
-      const { x, y } = indexToCoords(index);
-
-      const neighbors = [
-        { x: x - 1, y },
-        { x: x + 1, y },
-        { x, y: y - 1 },
-        { x, y: y + 1 },
-      ];
-
-      for (const { x: nx, y: ny } of neighbors) {
-        if (!isInBounds(nx, ny)) continue;
-        stack.push(coordsToIndex(nx, ny));
-      }
-    }
-
-    return region;
-  }, [activeLayerPixels, coordsToIndex, hoverIndex, indexToCoords, isInBounds, previewToolEffects, tool]);
+    return collectFillRegion(activeLayerPixels, hoverIndex, gridWidth, gridHeight);
+  }, [activeLayerPixels, gridHeight, gridWidth, hoverIndex, previewToolEffects, tool]);
 
   const brushPreview = useMemo(() => {
     if (

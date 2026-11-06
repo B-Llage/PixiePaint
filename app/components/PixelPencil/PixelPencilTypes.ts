@@ -30,6 +30,13 @@ export type BrushShape = (typeof BRUSH_SHAPES)[number]["id"];
 export type ShapeKind = (typeof SHAPE_TYPES)[number]["id"];
 export type ZoomMode = (typeof ZOOM_MODE_OPTIONS)[number]["id"];
 
+export interface Layer {
+  id: string;
+  name: string;
+  pixels: PixelValue[];
+  visible: boolean;
+}
+
 export interface SelectionRect {
   x: number;
   y: number;
