@@ -45,6 +45,7 @@ import { useCanvasViewport } from "./hooks/useCanvasViewport";
 import { useSelectionGestures, useSelectionState } from "./hooks/useSelection";
 import { useMoveDrag } from "./hooks/useMoveDrag";
 import { useStrokePipeline } from "./hooks/useStrokePipeline";
+import { useEditorDialogs } from "./hooks/useEditorDialogs";
 import { useLayerPreviews } from "./hooks/useLayerPreviews";
 import packageJson from "../../../package.json";
 
@@ -122,10 +123,21 @@ export function PixelPencil() {
     setHoverIndex((prev) => (prev === next ? prev : next));
   }, []);
   const [lastPointedIndex, setLastPointedIndex] = useState<number | null>(null);
-  const [isResetDialogOpen, setIsResetDialogOpen] = useState(false);
-  const [isSettingsDialogOpen, setIsSettingsDialogOpen] = useState(false);
-  const [isChangelogDialogOpen, setIsChangelogDialogOpen] = useState(false);
-  const [isHotkeysDialogOpen, setIsHotkeysDialogOpen] = useState(false);
+  const {
+    isResetDialogOpen,
+    isSettingsDialogOpen,
+    isChangelogDialogOpen,
+    isHotkeysDialogOpen,
+    anyDialogOpen,
+    openResetDialog: handleOpenResetDialog,
+    closeResetDialog: handleCloseResetDialog,
+    openSettingsDialog: handleOpenSettingsDialog,
+    closeSettingsDialog: handleCloseSettingsDialog,
+    openChangelogDialog: handleOpenChangelogDialog,
+    closeChangelogDialog: handleCloseChangelogDialog,
+    openHotkeysDialog: handleOpenHotkeysDialog,
+    closeHotkeysDialog: handleCloseHotkeysDialog,
+  } = useEditorDialogs();
   const [zoomMode, setZoomMode] = useState<ZoomMode>("in");
   const drawValueRef = useRef<PixelValue>(PALETTE_THEMES[0].colors[0]);
   const [drawValueVersion, setDrawValueVersion] = useState(0);
@@ -488,10 +500,6 @@ export function PixelPencil() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [redo, undo]);
 
-  const handleOpenResetDialog = useCallback(() => {
-    setIsResetDialogOpen(true);
-  }, []);
-
   const {
     isDrawingRef,
     activePointerIdRef,
@@ -544,12 +552,7 @@ export function PixelPencil() {
   useEffect(() => {
     const handleToolHotkeys = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
-      if (
-        isSettingsDialogOpen ||
-        isChangelogDialogOpen ||
-        isResetDialogOpen ||
-        isHotkeysDialogOpen
-      ) {
+      if (anyDialogOpen) {
         return;
       }
       const activeElement = document.activeElement as HTMLElement | null;
@@ -572,11 +575,8 @@ export function PixelPencil() {
     window.addEventListener("keydown", handleToolHotkeys);
     return () => window.removeEventListener("keydown", handleToolHotkeys);
   }, [
+    anyDialogOpen,
     handleOpenResetDialog,
-    isChangelogDialogOpen,
-    isHotkeysDialogOpen,
-    isResetDialogOpen,
-    isSettingsDialogOpen,
     selectTool,
   ]);
 
@@ -1304,41 +1304,11 @@ export function PixelPencil() {
 
 
 
-  const handleCloseResetDialog = useCallback(() => {
-    setIsResetDialogOpen(false);
-  }, []);
-
   const handleConfirmReset = useCallback(() => {
-    setIsResetDialogOpen(false);
+    handleCloseResetDialog();
     reset();
-  }, [reset]);
+  }, [handleCloseResetDialog, reset]);
 
-  useEscapeKey(isResetDialogOpen, handleCloseResetDialog);
-
-  const handleOpenSettingsDialog = useCallback(() => {
-    setIsSettingsDialogOpen(true);
-  }, []);
-
-  const handleCloseSettingsDialog = useCallback(() => {
-    setIsSettingsDialogOpen(false);
-  }, []);
-
-  const handleOpenChangelogDialog = useCallback(() => {
-    setIsChangelogDialogOpen(true);
-  }, []);
-
-  const handleCloseChangelogDialog = useCallback(() => {
-    setIsChangelogDialogOpen(false);
-  }, []);
-
-  useEscapeKey(isSettingsDialogOpen, handleCloseSettingsDialog);
-  useEscapeKey(isChangelogDialogOpen, handleCloseChangelogDialog);
-
-  const handleCloseHotkeysDialog = useCallback(() => {
-    setIsHotkeysDialogOpen(false);
-  }, []);
-
-  useEscapeKey(isHotkeysDialogOpen, handleCloseHotkeysDialog);
   useEscapeKey(isSaveDialogOpen, handleCloseSaveDialog);
 
   const selectedColorStyles = useMemo<SelectedColorStyles>(
@@ -1396,7 +1366,7 @@ export function PixelPencil() {
             </button>
             <button
               type="button"
-              onClick={() => setIsHotkeysDialogOpen(true)}
+              onClick={handleOpenHotkeysDialog}
               className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-200 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
             >
               Hotkeys
