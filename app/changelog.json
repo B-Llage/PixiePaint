@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.3.1",
+    "title": "Tool Pointers and Hotkey Fix",
+    "changes": [
+      "Turn on Use Tool as Mouse Pointer in Settings to show the selected tool's icon as the canvas cursor.",
+      "The Hotkeys dialog now lists the real keys for Magnifier (A) and Line (D).",
+      "Release notes are generated from the in-app changelog."
+    ]
+  },
+  {
     "version": "0.3.0",
     "title": "Canvas and Workflow Improvements",
     "changes": [
