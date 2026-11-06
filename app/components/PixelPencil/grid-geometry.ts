@@ -302,6 +302,32 @@ export function clearMaskRect(mask: Uint8Array, grid: GridSize, rect: DirtyRect)
   }
 }
 
+/** A reusable canvas-sized mask that remembers the bounds of what was stamped into it. */
+export type ScratchMask = { mask: Uint8Array; width: number; bounds: DirtyRect | null };
+
+/**
+ * Returns a clear scratch mask for `grid`: `scratch` cleared over its stamped
+ * bounds when it was laid out for the same grid, otherwise a new mask. Clearing
+ * costs the previous stamp's bounds, never the whole canvas.
+ */
+export function clearScratchMask(scratch: ScratchMask | null, grid: GridSize): ScratchMask {
+  if (!scratch || scratch.width !== grid.width || scratch.mask.length !== grid.width * grid.height) {
+    return { mask: createMask(grid), width: grid.width, bounds: null };
+  }
+  if (scratch.bounds) clearMaskRect(scratch.mask, grid, scratch.bounds);
+  scratch.bounds = null;
+  return scratch;
+}
+
+/** Stamps the cells into the scratch mask and extends its bounds. */
+export function stampScratch(scratch: ScratchMask, grid: GridSize, indices: ArrayLike<number>): void {
+  scratch.bounds = stampCells(scratch.mask, grid, indices, scratch.bounds);
+}
+
+/** The scratch mask as a preview, or `null` when nothing is stamped. */
+export const scratchPreview = (scratch: ScratchMask): PreviewMask | null =>
+  scratch.bounds ? { mask: scratch.mask, bounds: scratch.bounds } : null;
+
 /** The grid-clipped square a brush of `brushSize` covers around `centerIndex`, whatever its shape. */
 export function brushBounds(grid: GridSize, centerIndex: number, brushSize: number): DirtyRect {
   const { x: centerX, y: centerY } = indexToCoords(grid, centerIndex);

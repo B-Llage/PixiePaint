@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  clearScratchMask,
+  scratchPreview,
+  stampScratch,
   brushBounds,
   clearMaskRect,
   collectFillMask,
@@ -324,5 +327,26 @@ describe("mask helpers", () => {
     expect(brushBounds({ width: 8, height: 8 }, 0, 4)).toEqual({ x: 0, y: 0, width: 3, height: 3 });
     expect(brushBounds({ width: 8, height: 8 }, 3 * 8 + 3, 3)).toEqual({ x: 2, y: 2, width: 3, height: 3 });
     expect(brushBounds({ width: 8, height: 8 }, 7 * 8 + 7, 4)).toEqual({ x: 6, y: 6, width: 2, height: 2 });
+  });
+});
+
+describe("scratch masks", () => {
+  it("reuses one mask, clearing only the previous stamp, and reallocates for a new grid", () => {
+    const grid = { width: 4, height: 4 };
+    const first = clearScratchMask(null, grid);
+    expect(scratchPreview(first)).toBeNull();
+    stampScratch(first, grid, [5, 6]);
+    expect(scratchPreview(first)).toEqual({ mask: first.mask, bounds: { x: 1, y: 1, width: 2, height: 1 } });
+
+    const second = clearScratchMask(first, grid);
+    expect(second.mask).toBe(first.mask);
+    expect(Array.from(second.mask).every((value) => value === 0)).toBe(true);
+    stampScratch(second, grid, [15]);
+    expect(scratchPreview(second)?.bounds).toEqual({ x: 3, y: 3, width: 1, height: 1 });
+
+    // Same cell count, different layout: a fresh mask, so stale cells never leak.
+    const transposed = clearScratchMask(second, { width: 2, height: 8 });
+    expect(transposed.mask).not.toBe(second.mask);
+    expect(transposed.width).toBe(2);
   });
 });

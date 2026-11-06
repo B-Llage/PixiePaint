@@ -1,6 +1,7 @@
 import { useCallback } from "react";
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import type { RefObject, SetStateAction } from "react";
 
+import type { PreviewMask } from "../grid-geometry";
 import { createBuffer, type PixelBuffer } from "../pixel-buffer";
 import type { Layer } from "../PixelPencilTypes";
 import { generateLayerName } from "../pixel-operations";
@@ -15,7 +16,7 @@ export type LayerOperationsOptions = {
   setLayers: (next: SetStateAction<Layer[]>) => Layer[];
   activeLayerId: string;
   setActiveLayerId: (id: string) => void;
-  setPathPreview: Dispatch<SetStateAction<Set<number> | null>>;
+  setPathPreview: (next: PreviewMask | null) => void;
   setHoverIndexIfChanged: (next: number | null) => void;
   /**
    * Records a one-shot layer-list change. `apply` performs it and returns the buffers it removed

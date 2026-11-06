@@ -26,7 +26,6 @@ import { PixelPencilModals } from "./PixelPencilModals";
 import { LayersPanel } from "./LayersPanel";
 import {
   cloneBuffer,
-  composeInto,
   createBuffer,
   fillMask,
   isBufferEmpty,
@@ -37,10 +36,16 @@ import {
   type PixelBuffer,
 } from "./pixel-buffer";
 import {
+  clearScratchMask,
   collectFillMask,
   computeLineIndices as computeLineIndicesOnGrid,
   computeShapeCells as computeShapeCellsOnGrid,
+  scratchPreview,
+  stampScratch,
+  type PreviewMask,
+  type ScratchMask,
 } from "./grid-geometry";
+import type { OverlayFrame } from "./grid-renderer";
 import type { EditLayer } from "./layer-edit";
 import { checkerboardStyle } from "./checkerboard";
 import { useEscapeKey } from "./hooks/useEscapeKey";
@@ -107,7 +112,7 @@ export function PixelPencil() {
   // Bumps when thumbnails should catch up: after an action ends or the layer list changes.
   const [previewVersion, setPreviewVersion] = useState(0);
   const redrawSignal = useRedrawSignal();
-  const { compositeRef, compositeVersion, recompose } = useComposite({
+  const { composite, compositeRef, compositeVersion, dirtyRef: compositeDirtyRef, recompose } = useComposite({
     layersRef,
     width: gridWidth,
     height: gridHeight,
@@ -127,10 +132,19 @@ export function PixelPencil() {
   const [brushShape, setBrushShape] = useState<BrushShape>("square");
   const [shapeType, setShapeType] = useState<ShapeKind>("square");
   const [shapeFilled, setShapeFilled] = useState(false);
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const setHoverIndexIfChanged = useCallback((next: number | null) => {
-    setHoverIndex((prev) => (prev === next ? prev : next));
-  }, []);
+  // The hovered cell and the path preview change on every pointer move, so
+  // they live in refs and only request a canvas redraw instead of re-rendering
+  // the editor. The grid reads them through `getOverlayFrame`.
+  const { requestRedraw } = redrawSignal;
+  const hoverRef = useRef<number | null>(null);
+  const setHoverIndexIfChanged = useCallback(
+    (next: number | null) => {
+      if (hoverRef.current === next) return;
+      hoverRef.current = next;
+      requestRedraw();
+    },
+    [requestRedraw],
+  );
   const [lastPointedIndex, setLastPointedIndex] = useState<number | null>(null);
   const {
     isResetDialogOpen,
@@ -148,20 +162,31 @@ export function PixelPencil() {
     closeHotkeysDialog: handleCloseHotkeysDialog,
   } = useEditorDialogs();
   const [zoomMode, setZoomMode] = useState<ZoomMode>("in");
+  // The value a stroke paints; the path preview is drawn in it.
   const drawValueRef = useRef<PixelValue>(PALETTE_THEMES[0].colors[0]);
-  const [drawValueVersion, setDrawValueVersion] = useState(0);
-  const setDrawValue = useCallback((value: PixelValue) => {
-    if (drawValueRef.current === value) {
-      return;
-    }
-    drawValueRef.current = value;
-    setDrawValueVersion((prev) => prev + 1);
-  }, []);
+  const setDrawValue = useCallback(
+    (value: PixelValue) => {
+      if (drawValueRef.current === value) {
+        return;
+      }
+      drawValueRef.current = value;
+      requestRedraw();
+    },
+    [requestRedraw],
+  );
   const gridWrapperRef = useRef<HTMLDivElement | null>(null);
   const gridRef = useRef<HTMLCanvasElement | null>(null);
   const ignoredCanvasPointerIdRef = useRef<number | null>(null);
   const [dragStartIndex, setDragStartIndex] = useState<number | null>(null);
-  const [pathPreview, setPathPreview] = useState<Set<number> | null>(null);
+  const pathPreviewRef = useRef<PreviewMask | null>(null);
+  const setPathPreview = useCallback(
+    (next: PreviewMask | null) => {
+      if (pathPreviewRef.current === next) return;
+      pathPreviewRef.current = next;
+      requestRedraw();
+    },
+    [requestRedraw],
+  );
   // The grid size the layers' pixel arrays are laid out for; see the resize
   // migration below.
   const [layerDimensions, setLayerDimensions] = useState({ width: gridWidth, height: gridHeight });
@@ -301,6 +326,7 @@ export function PixelPencil() {
       setActiveLayerId,
       setHoverIndexIfChanged,
       setLayers,
+      setPathPreview,
     ],
   );
 
@@ -452,9 +478,9 @@ export function PixelPencil() {
   // layers against the wrong dimensions. Pixels keep their top-left anchored
   // position; cells outside the new grid are dropped and new cells are empty.
   // The composite follows on its own: a new size gives it a new buffer that it
-  // composes in full. The hover cell no longer maps to the same pixel
-  // afterwards, and history tiles were taken at the old size, so both are
-  // cleared.
+  // composes in full. History tiles were taken at the old size, so history is
+  // cleared; the hover cell no longer maps to the same pixel, so the effect
+  // below drops it (a ref, which render must not write).
   if (layerDimensions.width !== gridWidth || layerDimensions.height !== gridHeight) {
     setLayerDimensions({ width: gridWidth, height: gridHeight });
     setLayers((prevLayers) =>
@@ -466,8 +492,11 @@ export function PixelPencil() {
     setLayerVersion((version) => version + 1);
     setPreviewVersion((version) => version + 1);
     clearHistory();
-    setHoverIndexIfChanged(null);
   }
+
+  useEffect(() => {
+    setHoverIndexIfChanged(null);
+  }, [gridHeight, gridWidth, setHoverIndexIfChanged]);
 
   // Choosing a new grid size resets the persisted canvas pixel size to the
   // closest option that keeps the artwork at a similar on-screen size.
@@ -559,7 +588,7 @@ export function PixelPencil() {
         resetDrawingState();
       }
     },
-    [resetDrawingState],
+    [resetDrawingState, setPathPreview],
   );
 
   useEffect(() => {
@@ -602,8 +631,7 @@ export function PixelPencil() {
   const updateShiftLinePreview = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>, targetIndex: number | null) => {
       const supportsShiftLine = tool === "pencil" || tool === "eraser";
-      const clearPreview = () =>
-        setPathPreview((prev) => (prev === null ? prev : null));
+      const clearPreview = () => setPathPreview(null);
 
       if (!supportsShiftLine) {
         clearPreview();
@@ -640,6 +668,7 @@ export function PixelPencil() {
       lastPointedIndex,
       previewToolEffects,
       setDrawValue,
+      setPathPreview,
       tool,
     ],
   );
@@ -874,6 +903,7 @@ export function PixelPencil() {
       selectionRef,
       setDrawValue,
       setHoverIndexIfChanged,
+      setPathPreview,
       shapeFilled,
       shapeType,
       tool,
@@ -918,6 +948,7 @@ export function PixelPencil() {
       isDrawingRef,
       previewToolEffects,
       setHoverIndexIfChanged,
+      setPathPreview,
       shapeFilled,
       shapeType,
       tool,
@@ -1011,6 +1042,7 @@ export function PixelPencil() {
       processDrawingSamples,
       resolvePointerFromClientPoint,
       setHoverIndexIfChanged,
+      setPathPreview,
       shapeFilled,
       shapeType,
       tool,
@@ -1058,11 +1090,11 @@ export function PixelPencil() {
         commitStrokeBuffer(drawValueRef.current);
       }
       const pointerUpIndex = resolveIndexFromPointerEvent(event, { clamp: true });
-      setLastPointedIndex(pointerUpIndex ?? hoverIndex ?? lastPointedIndex);
+      setLastPointedIndex(pointerUpIndex ?? hoverRef.current ?? lastPointedIndex);
 
       if (wasDragAction) {
         const eventIndex = resolveIndexFromPointerEvent(event, { clamp: true });
-        const endIndex = eventIndex ?? hoverIndex ?? dragStartIndex;
+        const endIndex = eventIndex ?? hoverRef.current ?? dragStartIndex;
         if (dragStartIndex !== null && endIndex !== null) {
           const path =
             tool === "line"
@@ -1096,11 +1128,11 @@ export function PixelPencil() {
       finishMoveDrag,
       flushPointerQueue,
       hasActiveDrag,
-      hoverIndex,
       lastPointedIndex,
       resolveIndexFromPointerEvent,
       resolvePointerFromPointerEvent,
       setHoverIndexIfChanged,
+      setPathPreview,
       shapeFilled,
       shapeType,
       stopStroke,
@@ -1138,57 +1170,115 @@ export function PixelPencil() {
         setPathPreview(null);
       }
     }
-  }, [isDrawingRef, setHoverIndexIfChanged, tool]);
+  }, [isDrawingRef, setHoverIndexIfChanged, setPathPreview, tool]);
 
-  // The active layer's buffer is mutated in place, so `layerVersion` keys the
-  // preview on its contents. The set is bounded by the fill region's bounds.
-  const bucketPreview = useMemo(() => {
-    if (!previewToolEffects || hoverIndex === null || tool !== "bucket") return null;
-    const activeLayer = layers.find((layer) => layer.id === activeLayerId);
-    if (!activeLayer || activeLayer.pixels.data.length !== gridWidth * gridHeight) return null;
-    const region = collectFillMask(activeLayer.pixels, hoverIndex);
-    if (!region) return null;
-    const { mask, bounds } = region;
-    const cells = new Set<number>();
-    for (let y = bounds.y; y < bounds.y + bounds.height; y += 1) {
-      for (let x = bounds.x; x < bounds.x + bounds.width; x += 1) {
-        const index = y * gridWidth + x;
-        if (mask[index] !== 0) cells.add(index);
+  // Scratch masks for the hover and brush-size previews, reused frame to frame
+  // and cleared over their last footprint, plus the last bucket fill region.
+  const brushPreviewMaskRef = useRef<ScratchMask | null>(null);
+  const brushSizeShadowMaskRef = useRef<ScratchMask | null>(null);
+  const bucketPreviewCacheRef = useRef<{
+    index: number;
+    layerVersion: number;
+    buffer: PixelBuffer;
+    preview: PreviewMask | null;
+  } | null>(null);
+
+  // Builds the overlay for one frame from the hover and preview refs. The grid
+  // calls it on every draw, including redraws that do not re-render the
+  // editor, so it reads refs here (never during render).
+  const getOverlayFrame = useCallback((): OverlayFrame => {
+    const grid = { width: gridWidth, height: gridHeight };
+    const cellCount = gridWidth * gridHeight;
+    const rawHover = hoverRef.current;
+    const hover = rawHover !== null && rawHover >= 0 && rawHover < cellCount ? rawHover : null;
+    const drawsBrushPreview =
+      tool === "pencil" || tool === "eraser" || tool === "line" || tool === "shape";
+
+    let brush: PreviewMask | null = null;
+    if (!brushSizeDragging && previewToolEffects && hover !== null && drawsBrushPreview) {
+      const scratch = clearScratchMask(brushPreviewMaskRef.current, grid);
+      brushPreviewMaskRef.current = scratch;
+      stampScratch(scratch, grid, computeBrushIndices(hover));
+      brush = scratchPreview(scratch);
+    }
+
+    // The fill region is skipped while drawing and cached per hovered cell and
+    // layer contents (the active buffer is mutated in place; `layerVersion`
+    // bumps on every edit).
+    let bucket: PreviewMask | null = null;
+    if (previewToolEffects && tool === "bucket" && hover !== null && !isDrawingRef.current) {
+      const layer = getActiveLayer();
+      if (layer && layer.pixels.data.length === cellCount) {
+        const cached = bucketPreviewCacheRef.current;
+        if (
+          cached &&
+          cached.index === hover &&
+          cached.layerVersion === layerVersion &&
+          cached.buffer === layer.pixels
+        ) {
+          bucket = cached.preview;
+        } else {
+          bucket = collectFillMask(layer.pixels, hover);
+          bucketPreviewCacheRef.current = { index: hover, layerVersion, buffer: layer.pixels, preview: bucket };
+        }
       }
     }
-    return { cells, layerVersion };
-  }, [activeLayerId, gridHeight, gridWidth, hoverIndex, layerVersion, layers, previewToolEffects, tool]);
 
-  const brushPreview = useMemo(() => {
-    if (
-      brushSizeDragging ||
-      !previewToolEffects ||
-      hoverIndex === null ||
-      (tool !== "pencil" && tool !== "eraser" && tool !== "line" && tool !== "shape")
-    ) {
-      return null;
+    // While the brush size field is dragged, a shadow of the brush sits at the
+    // center of the visible artwork.
+    let brushSizeShadow: PreviewMask | null = null;
+    if (brushSizeDragging && canvasViewport.width > 0 && canvasViewport.height > 0) {
+      const artworkLeft = renderOffsetX - scrollOriginX;
+      const artworkTop = renderOffsetY - scrollOriginY;
+      const visibleLeft = Math.max(0, artworkLeft);
+      const visibleRight = Math.min(canvasViewport.width, artworkLeft + contentWidth);
+      const visibleTop = Math.max(0, artworkTop);
+      const visibleBottom = Math.min(canvasViewport.height, artworkTop + contentHeight);
+      if (visibleRight > visibleLeft && visibleBottom > visibleTop) {
+        const centerX = Math.min(gridWidth - 1, Math.max(0,
+          Math.floor(((visibleLeft + visibleRight) / 2 - artworkLeft) / displayCellSize),
+        ));
+        const centerY = Math.min(gridHeight - 1, Math.max(0,
+          Math.floor(((visibleTop + visibleBottom) / 2 - artworkTop) / displayCellSize),
+        ));
+        const scratch = clearScratchMask(brushSizeShadowMaskRef.current, grid);
+        brushSizeShadowMaskRef.current = scratch;
+        stampScratch(scratch, grid, computeBrushIndices(centerY * gridWidth + centerX));
+        brushSizeShadow = scratchPreview(scratch);
+      }
     }
-    return new Set(computeBrushIndices(hoverIndex));
-  }, [brushSizeDragging, computeBrushIndices, hoverIndex, previewToolEffects, tool]);
 
-  const brushSizePreview = useMemo(() => {
-    if (!brushSizeDragging || canvasViewport.width <= 0 || canvasViewport.height <= 0) return null;
-    const artworkLeft = renderOffsetX - scrollOriginX;
-    const artworkTop = renderOffsetY - scrollOriginY;
-    const visibleLeft = Math.max(0, artworkLeft);
-    const visibleRight = Math.min(canvasViewport.width, artworkLeft + contentWidth);
-    const visibleTop = Math.max(0, artworkTop);
-    const visibleBottom = Math.min(canvasViewport.height, artworkTop + contentHeight);
-    if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) return null;
-
-    const centerX = Math.min(gridWidth - 1, Math.max(0,
-      Math.floor(((visibleLeft + visibleRight) / 2 - artworkLeft) / displayCellSize),
-    ));
-    const centerY = Math.min(gridHeight - 1, Math.max(0,
-      Math.floor(((visibleTop + visibleBottom) / 2 - artworkTop) / displayCellSize),
-    ));
-    return new Set(computeBrushIndices(centerY * gridWidth + centerX));
-  }, [brushSizeDragging, canvasViewport.height, canvasViewport.width, computeBrushIndices, contentHeight, contentWidth, displayCellSize, gridHeight, gridWidth, renderOffsetX, renderOffsetY, scrollOriginX, scrollOriginY]);
+    return {
+      path: previewToolEffects ? pathPreviewRef.current : null,
+      brush,
+      bucket,
+      brushSizeShadow,
+      pathColor: drawValueRef.current,
+      hoverColor: tool === "eraser" ? null : activeColor,
+      dim: dimStrokePreview,
+    };
+  }, [
+    activeColor,
+    brushSizeDragging,
+    canvasViewport.height,
+    canvasViewport.width,
+    computeBrushIndices,
+    contentHeight,
+    contentWidth,
+    dimStrokePreview,
+    displayCellSize,
+    getActiveLayer,
+    gridHeight,
+    gridWidth,
+    isDrawingRef,
+    layerVersion,
+    previewToolEffects,
+    renderOffsetX,
+    renderOffsetY,
+    scrollOriginX,
+    scrollOriginY,
+    tool,
+  ]);
 
   // Clears every layer in place; history keeps a copy of each buffer for undo.
   const reset = useCallback(() => {
@@ -1203,22 +1293,6 @@ export function PixelPencil() {
     });
     setHoverIndexIfChanged(null);
   }, [compositeRef, layersRef, recordStructureChange, setHoverIndexIfChanged]);
-
-  // Temporary bridge until the grid reads the composite buffer directly: the
-  // flattened layers as `PixelValue[]`, rebuilt from the layer state whenever
-  // the composite changes (including the full compose after a resize, which
-  // happens after this render), tagged with the version it was built for.
-  const gridPixels = useMemo(() => {
-    const flattened = createBuffer(gridWidth, gridHeight);
-    composeInto(
-      flattened,
-      layers.filter((layer) => layer.pixels.width === gridWidth && layer.pixels.height === gridHeight),
-      null,
-    );
-    return { pixels: Array.from(flattened.data, (value) => unpackColor(value)), compositeVersion };
-  }, [compositeVersion, gridHeight, gridWidth, layers]);
-
-
 
   const handleConfirmReset = useCallback(() => {
     handleCloseResetDialog();
@@ -1355,18 +1429,13 @@ export function PixelPencil() {
                   displayCellSize={displayCellSize}
                   gridWrapperRef={gridWrapperRef}
                   gridRef={gridRef}
-                  pixels={gridPixels.pixels}
+                  composite={composite}
+                  compositeVersion={compositeVersion}
+                  compositeDirtyRef={compositeDirtyRef}
+                  getOverlayFrame={getOverlayFrame}
+                  redraw={redrawSignal}
                   showPixelGrid={showPixelGrid}
                   checkerSize={checkerSize}
-                  previewToolEffects={previewToolEffects}
-                  dimStrokePreview={dimStrokePreview}
-                  bucketPreview={bucketPreview?.cells ?? null}
-                  brushPreview={brushPreview}
-                  brushSizePreview={brushSizePreview}
-                  pathPreview={pathPreview}
-                  activeColor={activeColor}
-                  drawValueRef={drawValueRef}
-                  drawValueVersion={drawValueVersion}
                   tool={tool}
                   toolCursorIcon={currentTool.cursorIcon}
                   toolCursorHotspot={currentTool.cursorHotspot}

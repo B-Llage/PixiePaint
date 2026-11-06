@@ -4,10 +4,14 @@ import type { Dispatch, RefObject, SetStateAction } from "react";
 import {
   brushBounds,
   clearMaskRect,
+  clearScratchMask,
   computeBrushIndices as computeBrushIndicesOnGrid,
   createMask,
   stampCells,
+  stampScratch,
   traceWorldSegment as traceWorldSegmentOnGrid,
+  type PreviewMask,
+  type ScratchMask,
 } from "../grid-geometry";
 import type { EditLayer } from "../layer-edit";
 import { fillCells, fillMask, toPackedValue, type DirtyRect } from "../pixel-buffer";
@@ -30,7 +34,8 @@ export type StrokePipelineOptions = {
   activeLayerId: string;
   /** Writes to a layer through the editor, which records history and recomposites. */
   editLayer: EditLayer;
-  setPathPreview: Dispatch<SetStateAction<Set<number> | null>>;
+  /** Shows (or with `null` hides) the path preview; the mask may be reused by later builds. */
+  setPathPreview: (next: PreviewMask | null) => void;
   setDragStartIndex: Dispatch<SetStateAction<number | null>>;
   setDrawValue: (value: PixelValue) => void;
   setHoverIndexIfChanged: (next: number | null) => void;
@@ -56,8 +61,11 @@ export type StrokePipelineApi = {
   applyBrush: (index: number, value: PixelValue) => void;
   /** Paints the brush footprint along a path in one `editLayer` call bounded by the stamped cells. */
   applyLinePath: (path: number[], value: PixelValue) => void;
-  /** The preview cells for a path drawn with the current brush. */
-  buildLinePreview: (path: number[]) => Set<number>;
+  /**
+   * The preview mask for a path drawn with the current brush. The mask is a
+   * scratch reused (and cleared over its previous bounds) by the next build.
+   */
+  buildLinePreview: (path: number[]) => PreviewMask;
   /** Captures the pointer on the canvas and remembers it for the stroke, even if capture fails. */
   capturePointer: (canvas: HTMLCanvasElement, pointerId: number) => void;
   /** Line and shape tools: arms drawing without painting, so pointer-up applies the path. */
@@ -120,6 +128,8 @@ export function useStrokePipeline({
   const pointerRAFRef = useRef<number | null>(null);
   /** Canvas-sized scratch mask for path and stroke commits; cleared over its bounds after each use. */
   const scratchMaskRef = useRef<Uint8Array | null>(null);
+  /** Separate scratch mask for the path preview, which stays visible between commits. */
+  const previewMaskRef = useRef<ScratchMask | null>(null);
 
   useEffect(() => {
     const pointerQueue = pointerQueueRef.current;
@@ -178,18 +188,23 @@ export function useStrokePipeline({
     [fillFootprints],
   );
 
-  const buildLinePreview = useCallback(
-    (path: number[]) => {
-      const preview = new Set<number>();
-      for (const index of path) {
-        const indices = computeBrushIndices(index);
-        for (const target of indices) {
-          preview.add(target);
-        }
+  /** Stamps every cell's brush footprint into the preview scratch mask, cleared over its last stamp first. */
+  const buildFootprintPreview = useCallback(
+    (cells: Iterable<number>): PreviewMask => {
+      const grid = { width: gridWidth, height: gridHeight };
+      const scratch = clearScratchMask(previewMaskRef.current, grid);
+      previewMaskRef.current = scratch;
+      for (const cell of cells) {
+        stampScratch(scratch, grid, computeBrushIndices(cell));
       }
-      return preview;
+      return { mask: scratch.mask, bounds: scratch.bounds ?? { x: 0, y: 0, width: 0, height: 0 } };
     },
-    [computeBrushIndices],
+    [computeBrushIndices, gridHeight, gridWidth],
+  );
+
+  const buildLinePreview = useCallback(
+    (path: number[]) => buildFootprintPreview(path),
+    [buildFootprintPreview],
   );
 
   const traceWorldSegment = useCallback(
@@ -198,19 +213,7 @@ export function useStrokePipeline({
     [gridHeight, gridWidth],
   );
 
-  const buildPreviewFromAppliedCells = useCallback(
-    (cells: Iterable<number>) => {
-      const preview = new Set<number>();
-      for (const cell of cells) {
-        const footprint = computeBrushIndices(cell);
-        for (const idx of footprint) {
-          preview.add(idx);
-        }
-      }
-      return preview;
-    },
-    [computeBrushIndices],
-  );
+  const buildPreviewFromAppliedCells = buildFootprintPreview;
 
   const capturePointer = useCallback((canvas: HTMLCanvasElement, pointerId: number) => {
     try {

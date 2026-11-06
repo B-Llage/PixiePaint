@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 
+import type { PreviewMask } from "../grid-geometry";
 import type { EditLayer } from "../layer-edit";
 import { EMPTY_PIXEL, extractRect, intersectRect, type PixelBuffer } from "../pixel-buffer";
 import type { ToolId } from "../PixelPencilTools";
@@ -41,7 +42,7 @@ export type SelectionStateOptions = {
   activeLayerId: string;
   /** Writes to a layer through the editor, which records history and recomposites. */
   editLayer: EditLayer;
-  setPathPreview: Dispatch<SetStateAction<Set<number> | null>>;
+  setPathPreview: (next: PreviewMask | null) => void;
 };
 
 export type SelectionStateApi = {
@@ -307,7 +308,7 @@ export type SelectionGesturesOptions = {
   gridHeight: number;
   /** The grid's wrapper; a pointer-down outside it cancels the selection. */
   gridWrapperRef: RefObject<HTMLDivElement | null>;
-  setPathPreview: Dispatch<SetStateAction<Set<number> | null>>;
+  setPathPreview: (next: PreviewMask | null) => void;
   /** Converts a client point to a clamped grid cell, or null when the canvas is not ready. */
   resolvePointerFromClientPoint: (
     clientX: number,

@@ -79,6 +79,3 @@ body {
   animation: pixelSelectionDashSolid 0.75s linear infinite;
 }
 
-.selection-floating-pixel {
-  position: absolute;
-}

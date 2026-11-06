@@ -1,12 +1,16 @@
-import { useRef, useState } from "react";
-import type { MutableRefObject, SetStateAction } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { useEffect, useRef, useState } from "react";
+import type { MutableRefObject, RefObject, SetStateAction } from "react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PixelGrid } from "./PixelGrid";
 import { BucketTool, ColorPickerTool, EraserTool, LineTool, MagnifierTool, MoveTool, PencilTool, RectSelectionTool, ShapeTool } from "./PixelPencilTools";
-import type { PaintTool, PixelValue } from "./PixelPencilTypes";
+import type { PaintTool, SelectionState } from "./PixelPencilTypes";
 import { clampPan, getPanBounds, includePanOffset } from "./canvas-pan";
+import { createMask, stampCells } from "./grid-geometry";
+import type { OverlayFrame } from "./grid-renderer";
+import { useRedrawSignal } from "./hooks/useRedrawSignal";
+import { createBuffer, packColor, TRANSPARENT_PIXEL, type DirtyRect, type PixelBuffer } from "./pixel-buffer";
 
 const pointerDown = vi.fn();
 const pointerMove = vi.fn();
@@ -16,13 +20,54 @@ const backgroundDown = vi.fn();
 const wheelZoom = vi.fn();
 const viewportResize = vi.fn();
 
-function GridHarness({ width = 4, height = 4, viewportSize = 100, initialScroll = { x: 0, y: 0 }, brushSizePreview = null, pathPreview = null, brushPreview = null, bucketPreview = null, activeColor = "#ff0000", paintedPixel = null, dimStrokePreview = false, tool = "pencil", cursorTool = PencilTool, useToolAsMousePointer = false }: { width?: number; height?: number; viewportSize?: number; initialScroll?: { x: number; y: number }; brushSizePreview?: Set<number> | null; pathPreview?: Set<number> | null; brushPreview?: Set<number> | null; bucketPreview?: Set<number> | null; activeColor?: string; paintedPixel?: PixelValue; dimStrokePreview?: boolean; tool?: string; cursorTool?: PaintTool; useToolAsMousePointer?: boolean }) {
+const EMPTY_FRAME: OverlayFrame = {
+  path: null,
+  brush: null,
+  bucket: null,
+  brushSizeShadow: null,
+  pathColor: "#000000",
+  hoverColor: "#000000",
+  dim: false,
+};
+const emptyOverlay = () => EMPTY_FRAME;
+const noRedraw = { subscribe: () => () => {} };
+
+type HarnessProps = {
+  width?: number;
+  height?: number;
+  viewportSize?: number;
+  initialScroll?: { x: number; y: number };
+  tool?: string;
+  cursorTool?: PaintTool;
+  useToolAsMousePointer?: boolean;
+  composite?: PixelBuffer;
+  compositeVersion?: number;
+  compositeDirtyRef?: RefObject<DirtyRect | null>;
+  getOverlayFrame?: () => OverlayFrame;
+  redraw?: { subscribe(listener: () => void): () => void };
+  selectionOverlay?: SelectionState | null;
+};
+
+function GridHarness({
+  width = 4,
+  height = 4,
+  viewportSize = 100,
+  initialScroll = { x: 0, y: 0 },
+  tool = "pencil",
+  cursorTool = PencilTool,
+  useToolAsMousePointer = false,
+  composite,
+  compositeVersion = 0,
+  compositeDirtyRef,
+  getOverlayFrame = emptyOverlay,
+  redraw = noRedraw,
+  selectionOverlay = null,
+}: HarnessProps) {
   const [scroll, setScroll] = useState(initialScroll);
+  const [ownComposite] = useState(() => createBuffer(width, height));
+  const ownDirtyRef = useRef<DirtyRect | null>(null);
   const gridRef = useRef<HTMLCanvasElement | null>(null);
   const gridWrapperRef = useRef<HTMLDivElement | null>(null);
-  const drawValueRef = useRef<PixelValue>("#000000");
-  const pixels = Array<PixelValue>(width * height).fill(null);
-  if (pixels.length > 5) pixels[5] = paintedPixel;
   const contentWidth = width * 10;
   const contentHeight = height * 10;
   const boundsX = includePanOffset(getPanBounds(contentWidth, viewportSize, contentWidth <= viewportSize ? (viewportSize - contentWidth) / 2 : 0), scroll.x);
@@ -43,18 +88,13 @@ function GridHarness({ width = 4, height = 4, viewportSize = 100, initialScroll 
         displayCellSize={10}
         gridWrapperRef={gridWrapperRef as MutableRefObject<HTMLDivElement | null>}
         gridRef={gridRef as MutableRefObject<HTMLCanvasElement | null>}
-        pixels={pixels}
+        composite={composite ?? ownComposite}
+        compositeVersion={compositeVersion}
+        compositeDirtyRef={compositeDirtyRef ?? ownDirtyRef}
+        getOverlayFrame={getOverlayFrame}
+        redraw={redraw}
         showPixelGrid={false}
         checkerSize={1}
-        previewToolEffects={pathPreview !== null || brushPreview !== null || bucketPreview !== null}
-        dimStrokePreview={dimStrokePreview}
-        bucketPreview={bucketPreview}
-        brushPreview={brushPreview}
-        brushSizePreview={brushSizePreview}
-        pathPreview={pathPreview}
-        activeColor={activeColor}
-        drawValueRef={drawValueRef}
-        drawValueVersion={0}
         tool={tool}
         toolCursorIcon={cursorTool.cursorIcon}
         toolCursorHotspot={cursorTool.cursorHotspot}
@@ -65,7 +105,7 @@ function GridHarness({ width = 4, height = 4, viewportSize = 100, initialScroll 
         onScrollChange={changeScroll}
         onViewportResize={viewportResize}
         onWheelZoom={wheelZoom}
-        selectionOverlay={null}
+        selectionOverlay={selectionOverlay}
         selectionPreviewRect={null}
         handlePointerDown={pointerDown}
         handlePointerEnter={vi.fn()}
@@ -78,6 +118,80 @@ function GridHarness({ width = 4, height = 4, viewportSize = 100, initialScroll 
     </>
   );
 }
+
+/** jsdom has no ImageData without the canvas package. */
+class ImageDataStub {
+  data: Uint8ClampedArray;
+  width: number;
+  height: number;
+  constructor(dataOrWidth: Uint8ClampedArray | number, width: number, height?: number) {
+    if (typeof dataOrWidth === "number") {
+      this.width = dataOrWidth;
+      this.height = width;
+      this.data = new Uint8ClampedArray(dataOrWidth * width * 4);
+    } else {
+      this.data = dataOrWidth;
+      this.width = width;
+      this.height = height ?? dataOrWidth.length / 4 / width;
+    }
+  }
+}
+
+type Call = { name: string; args: unknown[] };
+
+function createContextStub() {
+  const calls: Call[] = [];
+  const record = (name: string) => (...args: unknown[]) => {
+    calls.push({ name, args });
+  };
+  return {
+    calls,
+    fillStyle: "" as unknown,
+    strokeStyle: "",
+    lineWidth: 1,
+    globalAlpha: 1,
+    imageSmoothingEnabled: true,
+    setTransform: record("setTransform"),
+    save: record("save"),
+    restore: record("restore"),
+    translate: record("translate"),
+    scale: record("scale"),
+    clearRect: record("clearRect"),
+    fillRect: record("fillRect"),
+    beginPath: record("beginPath"),
+    rect: record("rect"),
+    clip: record("clip"),
+    moveTo: record("moveTo"),
+    lineTo: record("lineTo"),
+    stroke: record("stroke"),
+    putImageData: record("putImageData"),
+    drawImage: record("drawImage"),
+    createPattern: () => null,
+  };
+}
+
+type ContextStub = ReturnType<typeof createContextStub>;
+
+/** Gives every canvas (on-screen and offscreen) its own recording context. */
+function stubCanvasContexts() {
+  const contexts = new Map<HTMLCanvasElement, ContextStub>();
+  vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation(function getContext(this: HTMLCanvasElement) {
+    let context = contexts.get(this);
+    if (!context) {
+      context = createContextStub();
+      contexts.set(this, context);
+    }
+    return context as unknown as CanvasRenderingContext2D;
+  } as unknown as typeof HTMLCanvasElement.prototype.getContext);
+  return {
+    of: (canvas: HTMLCanvasElement) => contexts.get(canvas)!,
+    all: () => [...contexts.values()],
+  };
+}
+
+/** The destination rects (x, y, width, height) of every `drawImage` on a context. */
+const drawDestinations = (context: ContextStub) =>
+  context.calls.filter((call) => call.name === "drawImage").map((call) => (call.args as number[]).slice(5));
 
 function scrollPosition() {
   return JSON.parse(screen.getByTestId("scroll").textContent ?? "{}") as { x: number; y: number };
@@ -118,6 +232,7 @@ beforeEach(() => {
     disconnect() {}
   });
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+  vi.stubGlobal("ImageData", ImageDataStub);
   vi.spyOn(HTMLCanvasElement.prototype, "getBoundingClientRect").mockReturnValue({
     left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100,
     x: 0, y: 0, toJSON: () => ({}),
@@ -173,107 +288,120 @@ describe("PixelGrid panning", () => {
     expect(canvas.style.cursor).toBe(`url("${cursorTool.cursorIcon}") ${x} ${y}, auto`);
   });
 
-  it.each(["pencil", "bucket"])("shows the selected color in the %s hover preview unless dimming is enabled", (tool) => {
-    const draws: { color: string; alpha: number; x: number; y: number }[] = [];
-    const context = {
-      fillStyle: "",
-      globalAlpha: 1,
-      setTransform: vi.fn(),
-      clearRect: vi.fn(),
-      fillRect(x: number, y: number) {
-        draws.push({ color: context.fillStyle, alpha: context.globalAlpha, x, y });
-      },
-    };
-    vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValue(context as unknown as CanvasRenderingContext2D);
-    const hoverPreview = new Set([5]);
-    const props = tool === "bucket" ? { bucketPreview: hoverPreview } : { brushPreview: hoverPreview };
-    const { rerender } = render(<GridHarness tool={tool} paintedPixel="#123456" activeColor="#ff8800" {...props} />);
-
-    expect(draws).toContainEqual({ color: "#ff8800", alpha: 1, x: 40, y: 40 });
-
-    draws.length = 0;
-    rerender(<GridHarness tool={tool} paintedPixel="#123456" activeColor="#ff8800" dimStrokePreview {...props} />);
-    expect(draws).toContainEqual({ color: "#123456", alpha: 0.7, x: 40, y: 40 });
-  });
-
-  it.each(["eraser", "transparent"])("shows the checkerboard for %s hover previews", (preview) => {
-    const draws: { color: string; alpha: number; x: number; y: number }[] = [];
-    const context = {
-      fillStyle: "",
-      globalAlpha: 1,
-      setTransform: vi.fn(),
-      clearRect: vi.fn(),
-      fillRect(x: number, y: number) {
-        draws.push({ color: context.fillStyle, alpha: context.globalAlpha, x, y });
-      },
-    };
-    vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValue(context as unknown as CanvasRenderingContext2D);
-    render(<GridHarness tool={preview === "eraser" ? "eraser" : "pencil"} activeColor={preview === "transparent" ? "transparent" : "#ff0000"} paintedPixel="#123456" brushPreview={new Set([5])} />);
-
-    expect(draws).toContainEqual({ color: "#d4d4d8", alpha: 1, x: 40, y: 40 });
-  });
-
-  it.each(["pencil", "line", "shape"])("renders %s stroke colors at full strength unless dimming is enabled", (tool) => {
-    const draws: { color: string; alpha: number; x: number; y: number }[] = [];
-    const context = {
-      fillStyle: "",
-      globalAlpha: 1,
-      setTransform: vi.fn(),
-      clearRect: vi.fn(),
-      fillRect(x: number, y: number) {
-        draws.push({ color: context.fillStyle, alpha: context.globalAlpha, x, y });
-      },
-    };
-    vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValue(context as unknown as CanvasRenderingContext2D);
-    const pathPreview = new Set([5]);
-    const brushPreview = tool === "pencil" ? new Set([5]) : null;
-    const { rerender } = render(<GridHarness tool={tool} pathPreview={pathPreview} brushPreview={brushPreview} />);
-
-    expect(draws).toContainEqual({ color: "#000000", alpha: 1, x: 40, y: 40 });
-
-    draws.length = 0;
-    rerender(<GridHarness tool={tool} pathPreview={pathPreview} brushPreview={brushPreview} dimStrokePreview />);
-    expect(draws).toContainEqual({ color: "#000000", alpha: 0.7, x: 40, y: 40 });
-  });
-
-  it("renders the brush size drag preview as a translucent shadow with a light edge", () => {
-    const draws: { color: string; x: number; y: number; width: number; height: number }[] = [];
-    const context = {
-      fillStyle: "",
-      globalAlpha: 1,
-      setTransform: vi.fn(),
-      clearRect: vi.fn(),
-      fillRect(x: number, y: number, width: number, height: number) {
-        draws.push({ color: context.fillStyle, x, y, width, height });
-      },
-    };
-    vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValue(context as unknown as CanvasRenderingContext2D);
-    render(<GridHarness brushSizePreview={new Set([5])} />);
-
-    expect(draws).toContainEqual({ color: "rgba(24, 24, 27, 0.55)", x: 40, y: 40, width: 10, height: 10 });
-    expect(draws.some((draw) => draw.color === "rgba(255, 255, 255, 0.8)" && draw.x === 40 && draw.y === 40)).toBe(true);
-  });
-
   it("renders fitted artwork at its centered base position and keeps a strip visible at the pan limit", () => {
-    const fillRect = vi.fn();
-    vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValue({
-      setTransform: vi.fn(),
-      clearRect: vi.fn(),
-      fillRect,
-    } as unknown as CanvasRenderingContext2D);
+    const contexts = stubCanvasContexts();
     const { container } = render(<GridHarness />);
     const canvas = container.querySelector("canvas")!;
-    expect(fillRect).toHaveBeenCalledWith(30, 30, 10, 10);
+    const context = contexts.of(canvas);
+    // The composite is one scaled blit of the visible cells.
+    expect(drawDestinations(context)).toEqual([[30, 30, 40, 40]]);
 
-    fillRect.mockClear();
+    context.calls.length = 0;
     fireEvent.wheel(canvas, { deltaX: -20, deltaY: -20 });
-    expect(fillRect).toHaveBeenCalledWith(50, 50, 10, 10);
+    expect(drawDestinations(context)).toEqual([[50, 50, 40, 40]]);
 
-    fillRect.mockClear();
+    context.calls.length = 0;
     fireEvent.wheel(canvas, { deltaX: 120, deltaY: 120 });
     expect(scrollPosition()).toEqual({ x: 30, y: 30 });
-    expect(fillRect).toHaveBeenCalledWith(0, 0, 100, 100);
-    expect(fillRect).toHaveBeenCalledWith(0, 0, 10, 10);
+    expect(context.calls).toContainEqual({ name: "fillRect", args: [0, 0, 100, 100] });
+    expect(drawDestinations(context)).toEqual([[0, 0, 40, 40]]);
+  });
+
+  it("uploads the dirty rect after a composite change, and everything for a new buffer", () => {
+    const contexts = stubCanvasContexts();
+    const composite = createBuffer(4, 4);
+    const dirtyRef: { current: DirtyRect | null } = { current: null };
+    const uploads = () =>
+      contexts
+        .all()
+        .flatMap((context) => context.calls)
+        .filter((call) => call.name === "putImageData")
+        .map((call) => call.args.slice(3));
+    const { rerender } = render(<GridHarness composite={composite} compositeDirtyRef={dirtyRef} />);
+    expect(uploads()).toEqual([[0, 0, 4, 4]]);
+
+    composite.data[5] = packColor("#ff0000");
+    dirtyRef.current = { x: 1, y: 1, width: 1, height: 1 };
+    rerender(<GridHarness composite={composite} compositeDirtyRef={dirtyRef} compositeVersion={1} />);
+    expect(uploads().at(-1)).toEqual([1, 1, 1, 1]);
+    expect(dirtyRef.current).toBeNull();
+
+    // A version change without a dirty rect re-uploads the whole buffer.
+    rerender(<GridHarness composite={composite} compositeDirtyRef={dirtyRef} compositeVersion={2} />);
+    expect(uploads().at(-1)).toEqual([0, 0, 4, 4]);
+
+    // A new buffer (a resize) gets a new surface, uploaded in full.
+    const resized = createBuffer(4, 4);
+    rerender(<GridHarness composite={resized} compositeDirtyRef={dirtyRef} compositeVersion={2} />);
+    expect(uploads()).toHaveLength(4);
+    expect(uploads().at(-1)).toEqual([0, 0, 4, 4]);
+  });
+
+  it("skips the composite blit while the buffer and grid sizes disagree", () => {
+    const contexts = stubCanvasContexts();
+    const { container } = render(<GridHarness composite={createBuffer(2, 2)} />);
+    expect(drawDestinations(contexts.of(container.querySelector("canvas")!))).toEqual([]);
+  });
+
+  it("a redraw request draws the overlay once per frame", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const contexts = stubCanvasContexts();
+    const grid = { width: 4, height: 4 };
+    const brushMask = createMask(grid);
+    const overlay = vi.fn((): OverlayFrame => ({
+      ...EMPTY_FRAME,
+      brush: { mask: brushMask, bounds: stampCells(brushMask, grid, [5], null)! },
+    }));
+    let requestRedraw: () => void = () => {};
+    function SignalHarness() {
+      const redraw = useRedrawSignal();
+      useEffect(() => {
+        requestRedraw = redraw.requestRedraw;
+      }, [redraw.requestRedraw]);
+      return <GridHarness redraw={redraw} getOverlayFrame={overlay} />;
+    }
+    const { container } = render(<SignalHarness />);
+    const context = contexts.of(container.querySelector("canvas")!);
+    const callsBefore = overlay.mock.calls.length;
+    context.calls.length = 0;
+
+    act(() => {
+      requestRedraw();
+      requestRedraw();
+      requestRedraw();
+    });
+    expect(frames).toHaveLength(1);
+    expect(overlay).toHaveBeenCalledTimes(callsBefore);
+
+    act(() => {
+      for (const frame of frames.splice(0)) frame(0);
+    });
+    expect(overlay).toHaveBeenCalledTimes(callsBefore + 1);
+    // One composite blit and one overlay blit over the hovered cell.
+    expect(drawDestinations(context)).toEqual([[30, 30, 40, 40], [40, 40, 10, 10]]);
+  });
+
+  it("the floating selection draws no per-pixel DOM nodes", () => {
+    const contexts = stubCanvasContexts();
+    const selection: SelectionState = {
+      rect: { x: 0, y: 0, width: 2, height: 2 },
+      offset: { dx: 1, dy: 0 },
+      data: new Uint32Array([packColor("#ff0000"), TRANSPARENT_PIXEL, packColor("#00ff00"), 0]),
+      isFloating: true,
+    };
+    const { container } = render(<GridHarness selectionOverlay={selection} />);
+    expect(container.querySelectorAll(".selection-floating-pixel")).toHaveLength(0);
+    expect(container.querySelectorAll(".selection-border")).toHaveLength(1);
+    // The pixels are blitted on the canvas at the offset rect, after the composite.
+    expect(drawDestinations(contexts.of(container.querySelector("canvas")!))).toEqual([
+      [30, 30, 40, 40],
+      [40, 30, 20, 20],
+    ]);
   });
 
   it("limits two-finger panning in both directions and maps pointers to the shifted canvas", () => {

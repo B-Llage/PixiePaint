@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { Dispatch, MutableRefObject, PointerEvent as ReactPointerEvent, SetStateAction } from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,9 @@ import packageJson from "../../../package.json";
 import { PixelPencil } from "./PixelPencil";
 import { MagnifierTool, TOOLS } from "./PixelPencilTools";
 import type { PixelValue } from "./PixelPencilTypes";
+import type { PreviewMask } from "./grid-geometry";
+import type { OverlayFrame } from "./grid-renderer";
+import { unpackColor, type PixelBuffer } from "./pixel-buffer";
 
 interface GridHarnessProps {
   displayCellSize: number;
@@ -16,9 +19,8 @@ interface GridHarnessProps {
   toolCursorIcon: string;
   toolCursorHotspot: { x: number; y: number };
   useToolAsMousePointer: boolean;
-  pixels: PixelValue[];
-  brushPreview: Set<number> | null;
-  brushSizePreview: Set<number> | null;
+  composite: PixelBuffer;
+  getOverlayFrame: () => OverlayFrame;
   selectionOverlay: { rect: { x: number; y: number; width: number; height: number } } | null;
   gridRef: MutableRefObject<HTMLCanvasElement | null>;
   gridWrapperRef: MutableRefObject<HTMLDivElement | null>;
@@ -32,12 +34,42 @@ interface GridHarnessProps {
   handlePointerCancel: (event: ReactPointerEvent<HTMLCanvasElement>) => void;
 }
 
+/** The cell indices a preview mask marks, scanning only its bounds. */
+function maskCells(preview: PreviewMask | null, gridWidth: number): number[] {
+  if (!preview) return [];
+  const cells: number[] = [];
+  const { mask, bounds } = preview;
+  for (let y = bounds.y; y < bounds.y + bounds.height; y += 1) {
+    for (let x = bounds.x; x < bounds.x + bounds.width; x += 1) {
+      if (mask[y * gridWidth + x]) cells.push(y * gridWidth + x);
+    }
+  }
+  return cells;
+}
+
+const layersPanelRender = vi.hoisted(() => vi.fn());
+
+vi.mock("./LayersPanel", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./LayersPanel")>();
+  return {
+    ...actual,
+    LayersPanel: function CountedLayersPanel(props: Parameters<typeof actual.LayersPanel>[0]) {
+      layersPanelRender();
+      return <actual.LayersPanel {...props} />;
+    },
+  };
+});
+
 vi.mock("./PixelGrid", () => ({
   PixelGrid: function GridHarness(props: GridHarnessProps) {
     const { onViewportResize } = props;
     useEffect(() => {
       onViewportResize({ width: 300, height: 300 });
     }, [onViewportResize]);
+    // Overlay masks live in refs read at draw time, so tests sample them on demand.
+    const [overlay, setOverlay] = useState<{ brush: number[]; brushSizeShadow: number[] }>({ brush: [], brushSizeShadow: [] });
+    const compositeWidth = props.composite.width;
+    const compositeValues = Array.from(props.composite.data, (value) => unpackColor(value));
 
     function pointerAt(x: number, offsetX = 0, y = 0): ReactPointerEvent<HTMLCanvasElement> {
       const clientX = (x + 0.5) * props.displayCellSize + offsetX;
@@ -68,15 +100,22 @@ vi.mock("./PixelGrid", () => ({
     return (
       <div ref={(node) => { props.gridWrapperRef.current = node; }}>
         <canvas ref={(node) => { props.gridRef.current = node; }} />
-        <output data-testid="first-two-pixels">{JSON.stringify(props.pixels.slice(0, 2))}</output>
-        <output data-testid="painted-cells">{JSON.stringify(props.pixels.flatMap((value, index) => value === null ? [] : [index]))}</output>
-        <output data-testid="brush-preview">{JSON.stringify([...(props.brushPreview ?? [])])}</output>
-        <output data-testid="brush-size-preview">{JSON.stringify([...(props.brushSizePreview ?? [])])}</output>
+        <output data-testid="first-two-pixels">{JSON.stringify(compositeValues.slice(0, 2))}</output>
+        <output data-testid="painted-cells">{JSON.stringify(compositeValues.flatMap((value, index) => value === null ? [] : [index]))}</output>
+        <output data-testid="brush-preview">{JSON.stringify(overlay.brush)}</output>
+        <output data-testid="brush-size-preview">{JSON.stringify(overlay.brushSizeShadow)}</output>
+        <button onClick={() => {
+          const frame = props.getOverlayFrame();
+          setOverlay({
+            brush: maskCells(frame.brush, compositeWidth),
+            brushSizeShadow: maskCells(frame.brushSizeShadow, compositeWidth),
+          });
+        }}>Read overlay</button>
         <output data-testid="selection-rect">{JSON.stringify(props.selectionOverlay?.rect ?? null)}</output>
         <output data-testid="canvas-scroll">{JSON.stringify(props.canvasScroll)}</output>
         <output data-testid="canvas-height">{props.gridHeight * props.displayCellSize}</output>
         <output data-testid="cell-size">{props.displayCellSize}</output>
-        <output data-testid="grid-width">{props.pixels.length / props.gridHeight}</output>
+        <output data-testid="grid-width">{props.composite.data.length / props.gridHeight}</output>
         <output data-testid="tool-cursor">{JSON.stringify({ icon: props.toolCursorIcon, hotspot: props.toolCursorHotspot, enabled: props.useToolAsMousePointer })}</output>
         <button onClick={() => props.onWheelZoom("in", 1, { x: 73.25, y: 91.5 })}>Zoom wheel in</button>
         <button onClick={() => props.onWheelZoom("out", 1, { x: 73.25, y: 91.5 })}>Zoom wheel out</button>
@@ -105,6 +144,9 @@ vi.mock("./PixelGrid", () => ({
         <button onClick={() => props.handlePointerDown(pointerAt(0), 0)}>Start move</button>
         <button onClick={() => props.handlePointerMove(pointerAt(1))}>Drag one cell</button>
         <button onClick={() => props.handlePointerMove(pointerAt(4, 0, 4))}>Hover center cell</button>
+        {[1, 2, 3].map((cell) => (
+          <button key={cell} onClick={() => props.handlePointerMove(pointerAt(cell, 0, cell))}>{`Hover cell ${cell}`}</button>
+        ))}
         <button onClick={() => props.handlePointerUp(pointerAt(1))}>Finish move</button>
         <button onClick={() => props.handlePointerCancel(pointerAt(1))}>Cancel move</button>
       </div>
@@ -137,10 +179,12 @@ function paintedCells(): number[] {
 }
 
 function brushPreview(): number[] {
+  fireEvent.click(screen.getByRole("button", { name: "Read overlay" }));
   return JSON.parse(screen.getByTestId("brush-preview").textContent ?? "[]") as number[];
 }
 
 function brushSizePreview(): number[] {
+  fireEvent.click(screen.getByRole("button", { name: "Read overlay" }));
   return JSON.parse(screen.getByTestId("brush-size-preview").textContent ?? "[]") as number[];
 }
 
@@ -681,6 +725,20 @@ describe("PixelPencil controls", () => {
     fireEvent.click(screen.getByRole("button", { name: "Paint center" }));
     await waitFor(() => expect(paintedCells()).toHaveLength(12));
     expect(paintedCells()).not.toContain(4 * 32 + 4);
+  });
+
+  it("moving the pointer does not re-render the layers panel", () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    const rendersAfterMount = layersPanelRender.mock.calls.length;
+    expect(rendersAfterMount).toBeGreaterThan(0);
+
+    for (const cell of [1, 2, 3]) {
+      fireEvent.click(screen.getByRole("button", { name: `Hover cell ${cell}` }));
+    }
+    expect(layersPanelRender).toHaveBeenCalledTimes(rendersAfterMount);
+    // The hover still reaches the canvas overlay.
+    expect(brushPreview()).toEqual([3 * 32 + 3]);
+    expect(layersPanelRender).toHaveBeenCalledTimes(rendersAfterMount);
   });
 
   it("shows the same single-cell hover preview for pencil, line, and shape", () => {

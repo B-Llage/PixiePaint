@@ -2,6 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { PreviewMask } from "../grid-geometry";
 import type { LayerEdit } from "../layer-edit";
 import { createBuffer, unpackColor, type DirtyRect } from "../pixel-buffer";
 import type { ToolId } from "../PixelPencilTools";
@@ -12,6 +13,21 @@ const GRID = 8;
 const CELL = 10;
 
 const client = (x: number, y: number) => ({ clientX: x * CELL, clientY: y * CELL });
+
+/** The cells a preview mask marks, checking each lies inside the mask's bounds. */
+function previewCells(preview: PreviewMask | null): Set<number> | null {
+  if (preview === null) return null;
+  const cells = new Set<number>();
+  preview.mask.forEach((value, index) => {
+    if (value === 0) return;
+    const x = index % GRID;
+    const y = Math.floor(index / GRID);
+    const { bounds } = preview;
+    expect(x >= bounds.x && x < bounds.x + bounds.width && y >= bounds.y && y < bounds.y + bounds.height).toBe(true);
+    cells.add(index);
+  });
+  return cells;
+}
 
 type Props = { tool: ToolId; brushSize: number; brushShape: BrushShape; previewToolEffects: boolean };
 
@@ -52,7 +68,7 @@ function setup(initial: Partial<Props> = {}) {
 
   const hook = renderHook(
     (props: Props) => {
-      const [pathPreview, setPathPreview] = useState<Set<number> | null>(null);
+      const [pathPreview, setPathPreview] = useState<PreviewMask | null>(null);
       const [dragStartIndex, setDragStartIndex] = useState<number | null>(3);
       const api = useStrokePipeline({
         gridWidth: GRID,
@@ -120,7 +136,9 @@ describe("useStrokePipeline", () => {
     expect(painted()).toEqual([0, 1, 2]);
     expect(edits).toHaveLength(1);
     expect(edits[0].rect).toEqual({ x: 0, y: 0, width: 3, height: 1 });
-    expect(hook.result.current.api.buildLinePreview([0, 9])).toEqual(new Set([0, 9]));
+    expect(previewCells(hook.result.current.api.buildLinePreview([0, 9]))).toEqual(new Set([0, 9]));
+    // The preview scratch is cleared over its last stamp, so a new build holds only its own cells.
+    expect(previewCells(hook.result.current.api.buildLinePreview([20]))).toEqual(new Set([20]));
 
     act(() => hook.result.current.api.applyLinePath([], "#0f0"));
     expect(edits).toHaveLength(1);
@@ -141,12 +159,12 @@ describe("useStrokePipeline", () => {
     expect(api().lastPaintedIndexRef.current).toBe(0);
     expect(setDrawValue).toHaveBeenCalledWith("#f00");
     expect(painted()).toEqual([0]);
-    expect(hook.result.current.pathPreview).toEqual(new Set([0]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0]));
 
     act(() => api().appendStrokePoint({ x: 0.505, y: 0.5 }));
-    expect(hook.result.current.pathPreview).toEqual(new Set([0]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0]));
     act(() => api().appendStrokePoint({ x: 2.5, y: 0.5 }));
-    expect(hook.result.current.pathPreview).toEqual(new Set([0, 1, 2]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0, 1, 2]));
     expect(painted()).toEqual([0]);
 
     act(() => api().commitStrokeBuffer("#f00"));
@@ -199,16 +217,16 @@ describe("useStrokePipeline", () => {
     act(() =>
       api().processDrawingSamples([client(1.5, 0.5), client(2.5, 0.5)] as unknown as PointerEvent[]),
     );
-    expect(hook.result.current.pathPreview).toEqual(new Set([0]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0]));
 
     runFrames();
-    expect(hook.result.current.pathPreview).toEqual(new Set([0, 1, 2]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0, 1, 2]));
     expect(setHoverIndexIfChanged).toHaveBeenLastCalledWith(2);
 
     // flushPointerQueue processes immediately, without waiting for a frame.
     act(() => api().processDrawingSamples([client(3.5, 0.5)] as unknown as PointerEvent[]));
     act(() => api().flushPointerQueue());
-    expect(hook.result.current.pathPreview).toEqual(new Set([0, 1, 2, 3]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0, 1, 2, 3]));
   });
 
   it("drops queued samples when the stroke has ended or the queue is cleared", () => {
@@ -222,7 +240,7 @@ describe("useStrokePipeline", () => {
     act(() => api().processDrawingSamples([client(1.5, 0.5)] as unknown as PointerEvent[]));
     act(() => api().clearPointerQueue());
     runFrames();
-    expect(hook.result.current.pathPreview).toEqual(new Set([0]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0]));
   });
 
   it("follows window pointer moves for the captured pointer while drawing freehand", () => {
@@ -247,16 +265,16 @@ describe("useStrokePipeline", () => {
     });
     move(2, 1.5);
     runFrames();
-    expect(hook.result.current.pathPreview).toEqual(new Set([0]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0]));
 
     const own = move(1, 2.5);
     runFrames();
-    expect(hook.result.current.pathPreview).toEqual(new Set([0, 1, 2]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0, 1, 2]));
     expect(own.defaultPrevented).toBe(true);
 
     hook.rerender({ tool: "line", brushSize: 1, brushShape: "square", previewToolEffects: true });
     move(1, 4.5);
     runFrames();
-    expect(hook.result.current.pathPreview).toEqual(new Set([0, 1, 2]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0, 1, 2]));
   });
 });

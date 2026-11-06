@@ -2,6 +2,7 @@ import { act, fireEvent, renderHook } from "@testing-library/react";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import type { PreviewMask } from "../grid-geometry";
 import type { LayerEdit } from "../layer-edit";
 import { createBuffer, packColor, unpackColor, type DirtyRect, type PixelBuffer } from "../pixel-buffer";
 import type { ToolId } from "../PixelPencilTools";
@@ -66,7 +67,7 @@ function setup(initial: { pixels?: PixelBuffer; tool?: ToolId } = {}) {
 
   const hook = renderHook(
     ({ tool }: { tool: ToolId }) => {
-      const [pathPreview, setPathPreview] = useState<Set<number> | null>(new Set([0]));
+      const [pathPreview, setPathPreview] = useState<PreviewMask | null>({ mask: new Uint8Array(GRID * GRID).fill(1, 0, 1), bounds: { x: 0, y: 0, width: 1, height: 1 } });
       const state = useSelectionState({
         gridWidth: GRID,
         gridHeight: GRID,
