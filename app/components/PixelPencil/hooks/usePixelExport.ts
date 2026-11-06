@@ -28,6 +28,13 @@ export function usePixelExport({
   const [isOpen, setIsOpen] = useState(false);
   const [selectedScale, setExportScale] =
     useState<(typeof EXPORT_SCALES)[number]>(1);
+  // The selection belongs to one grid size: a resize clears it (adjust state during render, no effect),
+  // so a scale hidden by a resize does not resurface when the grid shrinks again.
+  const [scalesForSize, setScalesForSize] = useState({ width: gridWidth, height: gridHeight });
+  if (scalesForSize.width !== gridWidth || scalesForSize.height !== gridHeight) {
+    setScalesForSize({ width: gridWidth, height: gridHeight });
+    setExportScale(1);
+  }
   const availableScales = useMemo(
     () =>
       EXPORT_SCALES.filter(
@@ -37,7 +44,7 @@ export function usePixelExport({
       ),
     [gridHeight, gridWidth],
   );
-  // A selection the grid has outgrown falls back to 1 without any effect or extra render.
+  // Within the render that sees a resize, the stale selection also reads as 1.
   const exportScale = availableScales.includes(selectedScale) ? selectedScale : 1;
   const [exportFilename, setExportFilename] = useState("pixel-art");
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null);

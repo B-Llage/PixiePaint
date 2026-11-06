@@ -30,12 +30,14 @@ export function useLayerPreviews(
   const hasArtwork = layers.length > 0 && gridWidth > 0 && gridHeight > 0;
   // Offscreen canvas the layer bytes are uploaded to; reused across renders, resized with the grid.
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Intermediate canvas for stepwise downscaling of large grids.
+  const scratchCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     if (!hasArtwork || typeof window === "undefined") return;
     let cancelled = false;
     const frame = window.requestAnimationFrame(() => {
-      const previews = renderLayerPreviews(layers, gridWidth, gridHeight, sourceCanvasRef);
+      const previews = renderLayerPreviews(layers, gridWidth, gridHeight, sourceCanvasRef, scratchCanvasRef);
       if (previews && !cancelled) {
         setGenerated(previews);
       }
@@ -63,6 +65,7 @@ function renderLayerPreviews(
   gridWidth: number,
   gridHeight: number,
   sourceCanvasRef: { current: HTMLCanvasElement | null },
+  scratchCanvasRef: { current: HTMLCanvasElement | null },
 ): Record<string, string> | null {
   const maxDimension = Math.max(gridWidth, gridHeight);
   const thumbWidth = thumbnailLength(gridWidth, maxDimension);
@@ -79,6 +82,29 @@ function renderLayerPreviews(
   if (source.height !== gridHeight) source.height = gridHeight;
   const sourceCtx = source.getContext("2d");
   if (!sourceCtx) return null;
+
+  // Grids above the thumbnail size are halved (smoothed) until within 2x of it, then drawn once more.
+  const halvings: Array<{ width: number; height: number }> = [];
+  for (let w = gridWidth, h = gridHeight; Math.max(w, h) > 2 * LAYER_PREVIEW_MAX_SIZE; ) {
+    w = Math.max(1, Math.ceil(w / 2));
+    h = Math.max(1, Math.ceil(h / 2));
+    halvings.push({ width: w, height: h });
+  }
+  const downscaling = maxDimension > LAYER_PREVIEW_MAX_SIZE;
+  let scratch: HTMLCanvasElement | null = null;
+  let scratchCtx: CanvasRenderingContext2D | null = null;
+  if (halvings.length > 0) {
+    scratch = scratchCanvasRef.current ?? document.createElement("canvas");
+    scratchCanvasRef.current = scratch;
+    if (scratch.width !== halvings[0].width) scratch.width = halvings[0].width;
+    if (scratch.height !== halvings[0].height) scratch.height = halvings[0].height;
+    scratchCtx = scratch.getContext("2d");
+    if (!scratchCtx) return null;
+    scratchCtx.imageSmoothingEnabled = true;
+    scratchCtx.imageSmoothingQuality = "high";
+    // Each step replaces the scratch contents (it may draw from its own previous step).
+    scratchCtx.globalCompositeOperation = "copy";
+  }
 
   const checkerSize = Math.max(Math.floor(thumbWidth / gridWidth), 2);
   const previews: Record<string, string> = {};
@@ -101,9 +127,21 @@ function renderLayerPreviews(
     drawCheckerboard();
     // One upload of the layer's own bytes, then one scaled blit.
     sourceCtx.putImageData(imageDataFromBuffer(layer.pixels), 0, 0);
-    ctx.imageSmoothingEnabled = false;
+    let from: HTMLCanvasElement = source;
+    let fromWidth = gridWidth;
+    let fromHeight = gridHeight;
+    if (scratch && scratchCtx) {
+      for (const step of halvings) {
+        scratchCtx.drawImage(from, 0, 0, fromWidth, fromHeight, 0, 0, step.width, step.height);
+        from = scratch;
+        fromWidth = step.width;
+        fromHeight = step.height;
+      }
+    }
+    ctx.imageSmoothingEnabled = downscaling;
+    if (downscaling) ctx.imageSmoothingQuality = "high";
     ctx.globalAlpha = layer.visible ? 1 : 0.4;
-    ctx.drawImage(source, 0, 0, gridWidth, gridHeight, 0, 0, thumbWidth, thumbHeight);
+    ctx.drawImage(from, 0, 0, fromWidth, fromHeight, 0, 0, thumbWidth, thumbHeight);
     ctx.globalAlpha = 1;
     previews[layer.id] = canvas.toDataURL("image/png");
   }

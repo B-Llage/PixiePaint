@@ -157,4 +157,18 @@ describe("usePixelExport", () => {
     rerender({ size: 2048 });
     expect(result.current.exportScale).toBe(1);
   });
+
+  it("does not bring back a hidden scale when the grid shrinks again", () => {
+    const compositeRef = { current: createBuffer(1, 1) };
+    const { result, rerender } = renderHook(
+      ({ size }) => usePixelExport({ gridWidth: size, gridHeight: size, compositeRef, compositeVersion: 0 }),
+      { initialProps: { size: 32 } },
+    );
+    act(() => result.current.setExportScale(10));
+    rerender({ size: 2048 });
+    expect(result.current.exportScale).toBe(1);
+
+    rerender({ size: 32 });
+    expect(result.current.exportScale).toBe(1);
+  });
 });

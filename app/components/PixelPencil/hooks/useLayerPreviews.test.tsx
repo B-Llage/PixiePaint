@@ -24,7 +24,7 @@ class ImageDataStub {
   ) {}
 }
 
-type Draw = { name: string; args: unknown[]; alpha: number; smoothing: boolean; canvas: HTMLCanvasElement };
+type Draw = { name: string; args: unknown[]; alpha: number; smoothing: boolean; quality: string; canvas: HTMLCanvasElement };
 
 function setup(initial: Props) {
   vi.stubGlobal("ImageData", ImageDataStub);
@@ -44,7 +44,7 @@ function setup(initial: Props) {
     if (contexts.has(this)) return contexts.get(this);
     const record = (name: string) =>
       vi.fn((...args: unknown[]) => {
-        draws.push({ name, args, alpha: context.globalAlpha, smoothing: context.imageSmoothingEnabled, canvas: this });
+        draws.push({ name, args, alpha: context.globalAlpha, smoothing: context.imageSmoothingEnabled, quality: context.imageSmoothingQuality, canvas: this });
       });
     const context = {
       clearRect: vi.fn(),
@@ -52,6 +52,8 @@ function setup(initial: Props) {
       fillStyle: "",
       globalAlpha: 1,
       imageSmoothingEnabled: true,
+      imageSmoothingQuality: "low",
+      globalCompositeOperation: "source-over",
       putImageData: record("putImageData"),
       drawImage: record("drawImage"),
     };
@@ -124,17 +126,63 @@ describe("useLayerPreviews", () => {
     expect(HTMLCanvasElement.prototype.toDataURL).toHaveBeenCalledTimes(2);
   });
 
-  it("shrinks thumbnails of large grids proportionally and reuses the offscreen canvas", () => {
-    const big = { id: "a", name: "a", pixels: createBuffer(256, 128), visible: true };
-    const { rerender, runFrames, named } = setup({ layers: [big], width: 256, height: 128 });
+  it("shrinks large grids by smoothed halvings and reuses the offscreen canvases", () => {
+    const painted = createBuffer(256, 256);
+    painted.data[0] = toPackedValue("#ff0000");
+    const big = { id: "a", name: "a", pixels: painted, visible: false };
+    const { rerender, runFrames, named } = setup({ layers: [big], width: 256, height: 256 });
     runFrames();
-    expect(named("drawImage")[0].args.slice(5)).toEqual([0, 0, 64, 32]);
 
-    rerender({ layers: [big], width: 256, height: 128, previewVersion: 1 });
+    // 256 -> 128 is within 2x of the 64px thumbnail, so one halving, then the final draw.
+    const blits = named("drawImage");
+    expect(blits).toHaveLength(2);
+    const [halving, final] = blits;
+    expect(halving.args.slice(1)).toEqual([0, 0, 256, 256, 0, 0, 128, 128]);
+    expect(halving.canvas).not.toBe(final.canvas);
+    expect(halving.smoothing).toBe(true);
+    expect(halving.alpha).toBe(1);
+    expect(final.args.slice(1)).toEqual([0, 0, 128, 128, 0, 0, 64, 64]);
+    expect(final.args[0]).toBe(halving.canvas);
+    expect(final.smoothing).toBe(true);
+    expect([halving.quality, final.quality]).toEqual(["high", "high"]);
+    // Hidden-layer alpha applies to the final draw only.
+    expect(final.alpha).toBe(0.4);
+
+    rerender({ layers: [big], width: 256, height: 256, previewVersion: 1 });
     runFrames();
     const uploads = named("putImageData");
     expect(uploads).toHaveLength(2);
     expect(uploads[1].canvas).toBe(uploads[0].canvas);
+    expect(named("drawImage")[2].canvas).toBe(halving.canvas);
+  });
+
+  it("halves repeatedly for very large grids with high-quality smoothing", () => {
+    const big = { id: "a", name: "a", pixels: createBuffer(2048, 1024), visible: true };
+    const { runFrames, named } = setup({ layers: [big], width: 2048, height: 1024 });
+    runFrames();
+    const sizes = named("drawImage").map((blit) => blit.args.slice(5));
+    expect(sizes).toEqual([
+      [0, 0, 1024, 512],
+      [0, 0, 512, 256],
+      [0, 0, 256, 128],
+      [0, 0, 128, 64],
+      [0, 0, 64, 32],
+    ]);
+  });
+
+  it("keeps a sparse pixel visible when a large grid is shrunk", () => {
+    const painted = createBuffer(256, 256);
+    painted.data[0] = toPackedValue("#ff0000");
+    const { runFrames, named } = setup({
+      layers: [{ id: "a", name: "a", pixels: painted, visible: true }],
+      width: 256,
+      height: 256,
+    });
+    runFrames();
+    // The upload carries the painted pixel and every later draw reads from it, smoothed rather than sampled.
+    const upload = named("putImageData")[0].args[0] as ImageDataStub;
+    expect(new Uint32Array(upload.data.buffer)[0]).toBe(painted.data[0]);
+    expect(named("drawImage").every((blit) => blit.smoothing)).toBe(true);
   });
 
   it("does not re-render thumbnails until previewVersion changes", () => {
