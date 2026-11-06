@@ -106,6 +106,108 @@ describe("usePixelExport", () => {
     expect(result.current.previewDataUrl).toBeNull();
   });
 
+  /** Records every canvas the hook creates with its final size, returning a context stub for each. */
+  function trackCanvases(options: { nullOnSave?: () => boolean } = {}) {
+    const sizes: { width: number; height: number }[] = [];
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
+      if (options.nullOnSave?.() && this.width > 1) return null;
+      sizes.push({ width: this.width, height: this.height });
+      return {
+        imageSmoothingEnabled: true,
+        putImageData: vi.fn(),
+        drawImage: vi.fn(),
+      } as unknown as CanvasRenderingContext2D;
+    } as unknown as typeof HTMLCanvasElement.prototype.getContext);
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/png;base64,preview");
+    return sizes;
+  }
+
+  it("keeps the preview canvas bounded at large grids", () => {
+    const runFrames = stubFrames();
+    const sizes = trackCanvases();
+    const toBlob = vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(() => {});
+    const compositeRef = { current: createBuffer(1, 1) };
+    const { result } = renderHook(() =>
+      usePixelExport({ gridWidth: 2048, gridHeight: 2048, compositeRef, compositeVersion: 0 }),
+    );
+    act(() => {
+      result.current.setExportScale(5);
+      result.current.open();
+    });
+    runFrames();
+    expect(sizes).toContainEqual({ width: 2048, height: 2048 });
+    expect(sizes.some((size) => size.width > 2048)).toBe(false);
+
+    act(() => result.current.confirmSave());
+    expect(sizes).toContainEqual({ width: 10240, height: 10240 });
+    expect(toBlob).toHaveBeenCalledOnce();
+  });
+
+  it("previews small grids at the chosen scale", () => {
+    const runFrames = stubFrames();
+    const sizes = trackCanvases();
+    const compositeRef = { current: createBuffer(1, 1) };
+    const { result } = renderHook(() =>
+      usePixelExport({ gridWidth: 32, gridHeight: 32, compositeRef, compositeVersion: 0 }),
+    );
+    act(() => {
+      result.current.setExportScale(5);
+      result.current.open();
+    });
+    runFrames();
+    expect(sizes).toContainEqual({ width: 160, height: 160 });
+  });
+
+  it("caps a mid-size grid preview at 1024 pixels", () => {
+    const runFrames = stubFrames();
+    const sizes = trackCanvases();
+    const compositeRef = { current: createBuffer(1, 1) };
+    const { result } = renderHook(() =>
+      usePixelExport({ gridWidth: 300, gridHeight: 100, compositeRef, compositeVersion: 0 }),
+    );
+    act(() => {
+      result.current.setExportScale(5);
+      result.current.open();
+    });
+    runFrames();
+    // floor(1024 / 300) = 3, below the chosen 5X.
+    expect(sizes).toContainEqual({ width: 900, height: 300 });
+  });
+
+  it("reports a null context on save", () => {
+    const runFrames = stubFrames();
+    let saving = false;
+    trackCanvases({ nullOnSave: () => saving });
+    const toBlob = vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(() => {});
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const compositeRef = { current: createBuffer(1, 1) };
+    const { result } = renderHook(() =>
+      usePixelExport({ gridWidth: 32, gridHeight: 32, compositeRef, compositeVersion: 0 }),
+    );
+    act(() => {
+      result.current.setExportScale(5);
+      result.current.open();
+    });
+    runFrames();
+    expect(result.current.saveError).toBeNull();
+
+    saving = true;
+    act(() => result.current.confirmSave());
+    expect(result.current.saveError).toBe("Could not render the PNG at this size.");
+    expect(result.current.isOpen).toBe(true);
+    expect(toBlob).not.toHaveBeenCalled();
+    expect(click).not.toHaveBeenCalled();
+
+    act(() => result.current.setExportScale(3));
+    expect(result.current.saveError).toBeNull();
+
+    saving = true;
+    act(() => result.current.confirmSave());
+    expect(result.current.saveError).not.toBeNull();
+    act(() => result.current.close());
+    expect(result.current.saveError).toBeNull();
+  });
+
   it("redraws the open preview from the composite when its version changes", () => {
     const runFrames = stubFrames();
     const uploads: Uint32Array[] = [];

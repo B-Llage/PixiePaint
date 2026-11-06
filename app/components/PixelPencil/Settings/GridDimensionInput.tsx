@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type KeyboardEvent } from "react";
+import { useId, useState, type KeyboardEvent } from "react";
 
 import {
   MAX_GRID_DIMENSION,
@@ -21,6 +21,8 @@ export function GridDimensionInput({
   value,
   onCommit,
 }: GridDimensionInputProps) {
+  const id = useId();
+  const messageId = `${id}-message`;
   const [draft, setDraft] = useState<string | null>(null);
   const [invalid, setInvalid] = useState(false);
 
@@ -47,20 +49,20 @@ export function GridDimensionInput({
   return (
     <div className="flex flex-col gap-2">
       <label
-        htmlFor={`grid-dimension-${label}`}
+        htmlFor={id}
         className="text-sm font-medium text-zinc-900 dark:text-zinc-50"
       >
         {label}
       </label>
       <input
-        id={`grid-dimension-${label}`}
+        id={id}
         type="number"
         inputMode="numeric"
         min={MIN_GRID_DIMENSION}
         max={MAX_GRID_DIMENSION}
         step={1}
-        aria-label={label}
         aria-invalid={invalid}
+        aria-describedby={invalid ? messageId : undefined}
         value={draft ?? String(value)}
         onChange={(event) => {
           setDraft(event.target.value);
@@ -71,7 +73,7 @@ export function GridDimensionInput({
         className="w-32 rounded border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-black dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:focus-visible:ring-white"
       />
       {invalid ? (
-        <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+        <p id={messageId} role="alert" className="text-sm text-red-600 dark:text-red-400">
           {GRID_DIMENSION_RANGE_MESSAGE}
         </p>
       ) : null}

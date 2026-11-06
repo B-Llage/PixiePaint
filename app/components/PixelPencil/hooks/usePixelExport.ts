@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { RefObject } from "react";
 
-import { EXPORT_SCALES, MAX_EXPORT_DIMENSION } from "../PixelPencil.constants";
+import { EXPORT_SCALES, MAX_EXPORT_DIMENSION, MAX_EXPORT_PREVIEW_DIMENSION } from "../PixelPencil.constants";
 import { imageDataFromBuffer, type PixelBuffer } from "../pixel-buffer";
+
+const SAVE_ERROR_MESSAGE = "Could not render the PNG at this size.";
 
 interface UsePixelExportParams {
   gridWidth: number;
@@ -49,6 +51,14 @@ export function usePixelExport({
   const [exportFilename, setExportFilename] = useState("pixel-art");
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null);
 
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // The error belongs to one scale: choosing another clears it (adjust state during render, no effect).
+  const [errorScale, setErrorScale] = useState(exportScale);
+  if (errorScale !== exportScale) {
+    setErrorScale(exportScale);
+    setSaveError(null);
+  }
+
   const createExportCanvas = useCallback(
     (scale: number) => {
       const canvas = document.createElement("canvas");
@@ -77,6 +87,12 @@ export function usePixelExport({
     [compositeRef, gridHeight, gridWidth],
   );
 
+  // The preview is bounded so a large grid at 5X does not allocate and PNG-encode the full output.
+  const previewScale = Math.max(
+    1,
+    Math.min(exportScale, Math.floor(MAX_EXPORT_PREVIEW_DIMENSION / Math.max(gridWidth, gridHeight))),
+  );
+
   const open = useCallback(() => {
     setIsOpen(true);
   }, []);
@@ -84,11 +100,13 @@ export function usePixelExport({
   const close = useCallback(() => {
     setIsOpen(false);
     setPreviewDataUrl(null);
+    setSaveError(null);
   }, []);
 
   const confirmSave = useCallback(() => {
     const canvas = createExportCanvas(exportScale);
     if (!canvas) {
+      setSaveError(SAVE_ERROR_MESSAGE);
       return;
     }
     canvas.toBlob((blob) => {
@@ -104,6 +122,7 @@ export function usePixelExport({
       link.click();
       URL.revokeObjectURL(url);
     }, "image/png");
+    setSaveError(null);
     setIsOpen(false);
     setPreviewDataUrl(null);
   }, [createExportCanvas, exportFilename, exportScale]);
@@ -112,14 +131,14 @@ export function usePixelExport({
     if (!isOpen || typeof window === "undefined") return;
     let cancelled = false;
     const frame = window.requestAnimationFrame(() => {
-      const canvas = createExportCanvas(exportScale);
+      const canvas = createExportCanvas(previewScale);
       if (!cancelled) setPreviewDataUrl(canvas ? canvas.toDataURL("image/png") : null);
     });
     return () => {
       cancelled = true;
       window.cancelAnimationFrame(frame);
     };
-  }, [compositeVersion, createExportCanvas, exportScale, isOpen]);
+  }, [compositeVersion, createExportCanvas, isOpen, previewScale]);
 
   return {
     isOpen,
@@ -131,6 +150,7 @@ export function usePixelExport({
     exportFilename,
     setExportFilename,
     previewDataUrl,
+    saveError,
     confirmSave,
   };
 }

@@ -409,6 +409,7 @@ export function PixelPencil() {
     exportFilename,
     setExportFilename: setExportFilenameState,
     previewDataUrl,
+    saveError,
   } = usePixelExport({
     gridWidth,
     gridHeight,
@@ -1575,6 +1576,7 @@ export function PixelPencil() {
         exportFilename={exportFilename}
         setExportFilename={setExportFilenameState}
         previewDataUrl={previewDataUrl}
+        saveError={saveError}
         gridWidth={gridWidth}
         gridHeight={gridHeight}
         isSettingsDialogOpen={isSettingsDialogOpen}

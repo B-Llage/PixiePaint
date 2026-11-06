@@ -48,6 +48,19 @@ describe("SettingsModal grid size inputs", () => {
     }
   });
 
+  it("ties the validation message to its input with aria-describedby", () => {
+    const { height, width } = renderModal();
+    expect(height.getAttribute("aria-describedby")).toBeNull();
+    fireEvent.change(height, { target: { value: "0" } });
+    fireEvent.blur(height);
+    const message = screen.getByText(RANGE_MESSAGE);
+    expect(message.id).not.toBe("");
+    expect(height.getAttribute("aria-describedby")).toBe(message.id);
+    expect(width.getAttribute("aria-describedby")).toBeNull();
+    expect(height.id).not.toMatch(/\s/);
+    expect(height.id).not.toBe(width.id);
+  });
+
   it("warns above 1024", () => {
     const { width } = renderModal();
     const warning = "Very large canvases need a desktop browser.";

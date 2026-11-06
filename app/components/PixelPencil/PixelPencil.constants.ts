@@ -31,3 +31,5 @@ export const DEFAULT_GRID_DIMENSION = 32;
 export const HISTORY_TILE_SIZE = 64;
 export const HISTORY_BYTE_BUDGET = 256 * 1024 * 1024;
 export const MAX_EXPORT_DIMENSION = 16384;
+/** The Save PNG preview is drawn with its longest side at most this many pixels. */
+export const MAX_EXPORT_PREVIEW_DIMENSION = 1024;

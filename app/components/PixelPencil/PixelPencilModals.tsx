@@ -20,6 +20,7 @@ interface PixelPencilModalsProps {
   exportFilename: string;
   setExportFilename: Dispatch<SetStateAction<string>>;
   previewDataUrl: string | null;
+  saveError: string | null;
   gridWidth: number;
   gridHeight: number;
   isSettingsDialogOpen: boolean;
@@ -44,6 +45,7 @@ export function PixelPencilModals({
   exportFilename,
   setExportFilename,
   previewDataUrl,
+  saveError,
   gridWidth,
   gridHeight,
   isSettingsDialogOpen,
@@ -65,6 +67,7 @@ export function PixelPencilModals({
           handleClose={handleCloseSaveDialog}
           handleConfirm={handleConfirmSave}
           confirmText="Save"
+          error={saveError}
           cancelText="Cancel"
           renderBody={() => (
             <div className="flex flex-col gap-4">

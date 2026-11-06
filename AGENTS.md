@@ -14,7 +14,7 @@ This directory is the Git repository and Next.js app root. Use its `package.json
 
 - Add or update a regression test with every new feature or bug fix. Test the user-visible behavior and important edge cases, not implementation details alone.
 - Run `npm run check` from this directory and make it pass before marking a task complete. This runs lint, TypeScript, and the full test suite. Run `npm run build` when changing Next.js configuration or production rendering.
-- Run `npm run bench` before and after changes to those paths and report the numbers in the PR.
+- Run `npm run bench` before and after changes to the pixel model, renderer, history, or tools and report the numbers in the PR.
 - Do not skip, delete, or weaken a failing test to make the gate green. Fix the behavior or the test's incorrect expectation. Report any check that could not run.
 - Update [ARCHITECTURE.md](./ARCHITECTURE.md) when the state model, data flow, or subsystem boundaries change.
 
