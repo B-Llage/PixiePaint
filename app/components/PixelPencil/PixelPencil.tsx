@@ -29,7 +29,6 @@ import {
   cloneLayers,
   cloneSelection,
   composeLayers,
-  generateLayerName,
   resizePixels,
 } from "./pixel-operations";
 import {
@@ -45,6 +44,7 @@ import { useCanvasViewport } from "./hooks/useCanvasViewport";
 import { useSelectionGestures, useSelectionState } from "./hooks/useSelection";
 import { useMoveDrag } from "./hooks/useMoveDrag";
 import { useStrokePipeline } from "./hooks/useStrokePipeline";
+import { createLayerId, useLayerOperations } from "./hooks/useLayerOperations";
 import { useLayerPreviews } from "./hooks/useLayerPreviews";
 import packageJson from "../../../package.json";
 
@@ -65,9 +65,6 @@ const HOTKEY_ITEMS = [
   { label: "Redo", key: "Ctrl/Cmd + Shift + Z" },
   { label: "Clear", key: "Ctrl/Cmd + Backspace" },
 ];
-
-const createLayerId = () =>
-  `layer-${Math.random().toString(36).slice(2, 7)}${Date.now().toString(36)}`;
 
 export function PixelPencil() {
   const {
@@ -649,111 +646,24 @@ export function PixelPencil() {
     [gridHeight, gridWidth],
   );
 
-  const handleCreateLayer = useCallback(() => {
-    commitSnapshot();
-    const newLayer: Layer = {
-      id: createLayerId(),
-      name: generateLayerName(layersRef.current),
-      pixels: new Array(totalCells).fill(null) as PixelValue[],
-      visible: true,
-    };
-    const nextLayers = [...layersRef.current, newLayer];
-    setLayers(nextLayers);
-    setActiveLayerId(newLayer.id);
-    setPathPreview(null);
-    setHoverIndexIfChanged(null);
-  }, [commitSnapshot, layersRef, setHoverIndexIfChanged, setLayers, setPathPreview, totalCells]);
-
-  const handleDeleteLayer = useCallback(
-    (layerId: string) => {
-      const currentLayers = layersRef.current;
-      if (currentLayers.length <= 1) {
-        return;
-      }
-      if (!currentLayers.some((layer) => layer.id === layerId)) {
-        return;
-      }
-      commitSnapshot();
-      const nextLayers = currentLayers.filter((layer) => layer.id !== layerId);
-      if (!nextLayers.length) return;
-      let nextActiveId = activeLayerId;
-      if (
-        layerId === activeLayerId ||
-        !nextLayers.some((layer) => layer.id === activeLayerId)
-      ) {
-        nextActiveId = nextLayers[nextLayers.length - 1].id;
-      }
-      setLayers(nextLayers);
-      setActiveLayerId(nextActiveId);
-      setPathPreview(null);
-      setHoverIndexIfChanged(null);
-    },
-    [activeLayerId, commitSnapshot, layersRef, setHoverIndexIfChanged, setLayers, setPathPreview],
-  );
-
-  const handleRenameLayer = useCallback(
-    (layerId: string, name: string) => {
-      const trimmedName = name.trim();
-      const currentLayers = layersRef.current;
-      const layer = currentLayers.find((item) => item.id === layerId);
-      if (!layer || !trimmedName || layer.name === trimmedName) return;
-
-      recordSnapshot();
-      const nextLayers = currentLayers.map((item) =>
-        item.id === layerId ? { ...item, name: trimmedName } : item,
-      );
-      setLayers(nextLayers);
-    },
-    [layersRef, recordSnapshot, setLayers],
-  );
-
-  const handleToggleLayerVisibility = useCallback(
-    (layerId: string) => {
-      if (!layersRef.current.some((layer) => layer.id === layerId)) {
-        return;
-      }
-      commitSnapshot();
-      const nextLayers = layersRef.current.map((layer) =>
-        layer.id === layerId ? { ...layer, visible: !layer.visible } : layer,
-      );
-      setLayers(nextLayers);
-    },
-    [commitSnapshot, layersRef, setLayers],
-  );
-
-  const handleReorderLayers = useCallback(
-    (fromIndex: number, toIndex: number) => {
-      const currentLayers = layersRef.current;
-      if (
-        fromIndex === toIndex ||
-        fromIndex < 0 ||
-        toIndex < 0 ||
-        fromIndex >= currentLayers.length ||
-        toIndex >= currentLayers.length
-      ) {
-        return;
-      }
-      commitSnapshot();
-      const nextLayers = [...currentLayers];
-      const [moved] = nextLayers.splice(fromIndex, 1);
-      nextLayers.splice(toIndex, 0, moved);
-      setLayers(nextLayers);
-    },
-    [commitSnapshot, layersRef, setLayers],
-  );
-
-  const handleSelectLayer = useCallback(
-    (layerId: string) => {
-      if (layerId === activeLayerId) return;
-      if (!layersRef.current.some((layer) => layer.id === layerId)) {
-        return;
-      }
-      setActiveLayerId(layerId);
-      setPathPreview(null);
-      setHoverIndexIfChanged(null);
-    },
-    [activeLayerId, layersRef, setHoverIndexIfChanged],
-  );
+  const {
+    createLayer: handleCreateLayer,
+    deleteLayer: handleDeleteLayer,
+    renameLayer: handleRenameLayer,
+    toggleLayerVisibility: handleToggleLayerVisibility,
+    reorderLayers: handleReorderLayers,
+    selectLayer: handleSelectLayer,
+  } = useLayerOperations({
+    totalCells,
+    layersRef,
+    setLayers,
+    activeLayerId,
+    setActiveLayerId,
+    setPathPreview,
+    setHoverIndexIfChanged,
+    recordSnapshot,
+    commitSnapshot,
+  });
 
   const floodFill = useCallback(
     (startIndex: number, fillValue: PixelValue) => {
