@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { RefObject } from "react";
 
-import { EXPORT_SCALES } from "../PixelPencil.constants";
-import { isPaintedPixel, unpackColor, type PixelBuffer } from "../pixel-buffer";
+import { EXPORT_SCALES, MAX_EXPORT_DIMENSION } from "../PixelPencil.constants";
+import { imageDataFromBuffer, type PixelBuffer } from "../pixel-buffer";
 
 interface UsePixelExportParams {
   gridWidth: number;
@@ -26,8 +26,19 @@ export function usePixelExport({
   compositeVersion,
 }: UsePixelExportParams) {
   const [isOpen, setIsOpen] = useState(false);
-  const [exportScale, setExportScale] =
+  const [selectedScale, setExportScale] =
     useState<(typeof EXPORT_SCALES)[number]>(1);
+  const availableScales = useMemo(
+    () =>
+      EXPORT_SCALES.filter(
+        (scale) =>
+          scale === 1 ||
+          (gridWidth * scale <= MAX_EXPORT_DIMENSION && gridHeight * scale <= MAX_EXPORT_DIMENSION),
+      ),
+    [gridHeight, gridWidth],
+  );
+  // A selection the grid has outgrown falls back to 1 without any effect or extra render.
+  const exportScale = availableScales.includes(selectedScale) ? selectedScale : 1;
   const [exportFilename, setExportFilename] = useState("pixel-art");
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null);
 
@@ -43,18 +54,16 @@ export function usePixelExport({
 
       ctx.imageSmoothingEnabled = false;
 
-      const composite = compositeRef.current;
-      const { data, width } = composite;
-      for (let index = 0; index < data.length; index += 1) {
-        const value = data[index];
-        if (!isPaintedPixel(value)) {
-          continue;
-        }
-        const x = index % width;
-        const y = Math.floor(index / width);
-        ctx.fillStyle = unpackColor(value) as string;
-        ctx.fillRect(x * scale, y * scale, scale, scale);
+      // One upload of the composite at scale 1, then one nearest-neighbor blit to the output size.
+      const source = document.createElement("canvas");
+      source.width = gridWidth;
+      source.height = gridHeight;
+      const sourceCtx = source.getContext("2d");
+      if (!sourceCtx) {
+        return null;
       }
+      sourceCtx.putImageData(imageDataFromBuffer(compositeRef.current), 0, 0);
+      ctx.drawImage(source, 0, 0, gridWidth, gridHeight, 0, 0, canvas.width, canvas.height);
 
       return canvas;
     },
@@ -110,6 +119,7 @@ export function usePixelExport({
     open,
     close,
     exportScale,
+    availableScales,
     setExportScale,
     exportFilename,
     setExportFilename,

@@ -15,7 +15,19 @@ const layer = (id: string, values: PixelValue[] = [null, null, null, null]): Lay
 
 type Props = { layers: Layer[]; width: number; height: number; previewVersion?: number };
 
+/** jsdom has no ImageData without the canvas package. */
+class ImageDataStub {
+  constructor(
+    public data: Uint8ClampedArray,
+    public width: number,
+    public height: number,
+  ) {}
+}
+
+type Draw = { name: string; args: unknown[]; alpha: number; smoothing: boolean; canvas: HTMLCanvasElement };
+
 function setup(initial: Props) {
+  vi.stubGlobal("ImageData", ImageDataStub);
   const frames: FrameRequestCallback[] = [];
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     frames.push(callback);
@@ -25,20 +37,25 @@ function setup(initial: Props) {
     delete frames[id - 1];
   });
   const pendingFrames = () => frames.filter(Boolean).length;
-  const fillRect = vi.fn();
-  const fillStyles: string[] = [];
+  const draws: Draw[] = [];
+  const contexts = new Map<HTMLCanvasElement, unknown>();
   let toDataURLCalls = 0;
-  HTMLCanvasElement.prototype.getContext = vi.fn(() => {
+  HTMLCanvasElement.prototype.getContext = vi.fn(function (this: HTMLCanvasElement) {
+    if (contexts.has(this)) return contexts.get(this);
+    const record = (name: string) =>
+      vi.fn((...args: unknown[]) => {
+        draws.push({ name, args, alpha: context.globalAlpha, smoothing: context.imageSmoothingEnabled, canvas: this });
+      });
     const context = {
       clearRect: vi.fn(),
-      fillRect: vi.fn((...args: number[]) => {
-        fillStyles.push(context.fillStyle);
-        fillRect(...args);
-      }),
+      fillRect: vi.fn(),
       fillStyle: "",
       globalAlpha: 1,
       imageSmoothingEnabled: true,
+      putImageData: record("putImageData"),
+      drawImage: record("drawImage"),
     };
+    contexts.set(this, context);
     return context;
   }) as unknown as typeof HTMLCanvasElement.prototype.getContext;
   HTMLCanvasElement.prototype.toDataURL = vi.fn(() => `data:image/png;base64,frame-${++toDataURLCalls}`);
@@ -53,7 +70,8 @@ function setup(initial: Props) {
     (props: Props) => useLayerPreviews(props.layers, props.width, props.height, props.previewVersion ?? 0),
     { initialProps: initial },
   );
-  return { ...hook, pendingFrames, runFrames, fillRect, fillStyles };
+  const named = (name: string) => draws.filter((draw) => draw.name === name);
+  return { ...hook, pendingFrames, runFrames, draws, named };
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -70,7 +88,7 @@ describe("useLayerPreviews", () => {
   });
 
   it("renders one thumbnail per layer on the next frame", () => {
-    const { result, runFrames, fillRect } = setup({
+    const { result, runFrames } = setup({
       layers: [layer("a", ["#ff0000", null, null, null]), layer("b")],
       width: 2,
       height: 2,
@@ -81,22 +99,76 @@ describe("useLayerPreviews", () => {
     expect(Object.keys(result.current)).toEqual(["a", "b"]);
     expect(result.current.a).toMatch(/^data:image\/png/);
     expect(result.current.a).not.toBe(result.current.b);
-    // The red pixel is drawn at the top-left cell, scaled to the thumbnail.
-    expect(fillRect).toHaveBeenCalledWith(0, 0, 32, 32);
   });
 
-  it("re-renders thumbnails when the preview version bumps after an in-place edit", () => {
+  it("rasterizes each layer with one putImageData and one scaled drawImage", () => {
+    const layers = [layer("a", ["#ff0000", null, null, null]), { ...layer("b"), visible: false }];
+    const { runFrames, named } = setup({ layers, width: 2, height: 2 });
+    runFrames();
+
+    const uploads = named("putImageData");
+    expect(uploads).toHaveLength(2);
+    // The upload shares the layer buffer's memory and lands in a grid-sized offscreen canvas.
+    const first = uploads[0].args[0] as ImageDataStub;
+    expect(first.data.buffer).toBe(layers[0].pixels.data.buffer);
+    expect([first.width, first.height]).toEqual([2, 2]);
+    expect(uploads[0].canvas.width).toBe(2);
+    expect(uploads[0].canvas.height).toBe(2);
+
+    const blits = named("drawImage");
+    expect(blits).toHaveLength(2);
+    // 2x2 grid scales by 32 into a 64x64 thumbnail with smoothing off; hidden layers draw at 0.4.
+    expect(blits[0].args.slice(1)).toEqual([0, 0, 2, 2, 0, 0, 64, 64]);
+    expect(blits.map((blit) => blit.smoothing)).toEqual([false, false]);
+    expect(blits.map((blit) => blit.alpha)).toEqual([1, 0.4]);
+    expect(HTMLCanvasElement.prototype.toDataURL).toHaveBeenCalledTimes(2);
+  });
+
+  it("shrinks thumbnails of large grids proportionally and reuses the offscreen canvas", () => {
+    const big = { id: "a", name: "a", pixels: createBuffer(256, 128), visible: true };
+    const { rerender, runFrames, named } = setup({ layers: [big], width: 256, height: 128 });
+    runFrames();
+    expect(named("drawImage")[0].args.slice(5)).toEqual([0, 0, 64, 32]);
+
+    rerender({ layers: [big], width: 256, height: 128, previewVersion: 1 });
+    runFrames();
+    const uploads = named("putImageData");
+    expect(uploads).toHaveLength(2);
+    expect(uploads[1].canvas).toBe(uploads[0].canvas);
+  });
+
+  it("does not re-render thumbnails until previewVersion changes", () => {
     const layers = [layer("a")];
-    const { result, rerender, runFrames, fillStyles } = setup({ layers, width: 2, height: 2, previewVersion: 0 });
+    const { result, rerender, runFrames, pendingFrames, named } = setup({ layers, width: 2, height: 2 });
     runFrames();
     const before = result.current.a;
-    expect(fillStyles).not.toContain("#00ff00");
+    expect(named("putImageData")).toHaveLength(1);
+
+    // Edits that do not bump previewVersion (a stroke in progress) schedule nothing.
+    layers[0].pixels.data[0] = toPackedValue("#00ff00");
+    rerender({ layers, width: 2, height: 2, previewVersion: 0 });
+    expect(pendingFrames()).toBe(0);
+    expect(named("putImageData")).toHaveLength(1);
+
+    rerender({ layers, width: 2, height: 2, previewVersion: 1 });
+    runFrames();
+    expect(named("putImageData")).toHaveLength(2);
+    expect(result.current.a).not.toBe(before);
+  });
+
+  it("re-renders thumbnails from the edited buffer when the preview version bumps", () => {
+    const layers = [layer("a")];
+    const { result, rerender, runFrames, named } = setup({ layers, width: 2, height: 2, previewVersion: 0 });
+    runFrames();
+    const before = result.current.a;
 
     // Buffers are edited in place, so the layers array keeps its identity.
     layers[0].pixels.data[3] = toPackedValue("#00ff00");
     rerender({ layers, width: 2, height: 2, previewVersion: 1 });
     runFrames();
-    expect(fillStyles).toContain("#00ff00");
+    const upload = named("putImageData").at(-1)!.args[0] as ImageDataStub;
+    expect(upload.data.buffer).toBe(layers[0].pixels.data.buffer);
+    expect(new Uint32Array(upload.data.buffer)[3]).toBe(layers[0].pixels.data[3]);
     expect(result.current.a).not.toBe(before);
   });
 

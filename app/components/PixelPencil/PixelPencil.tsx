@@ -404,6 +404,7 @@ export function PixelPencil() {
     close: handleCloseSaveDialog,
     confirmSave: handleConfirmSave,
     exportScale,
+    availableScales: exportScales,
     setExportScale: setExportScaleState,
     exportFilename,
     setExportFilename: setExportFilenameState,
@@ -1569,6 +1570,7 @@ export function PixelPencil() {
         handleCloseSaveDialog={handleCloseSaveDialog}
         handleConfirmSave={handleConfirmSave}
         exportScale={exportScale}
+        exportScales={exportScales}
         setExportScale={setExportScaleState}
         exportFilename={exportFilename}
         setExportFilename={setExportFilenameState}

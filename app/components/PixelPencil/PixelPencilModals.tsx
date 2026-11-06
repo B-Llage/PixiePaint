@@ -15,6 +15,7 @@ interface PixelPencilModalsProps {
   handleCloseSaveDialog: () => void;
   handleConfirmSave: () => void;
   exportScale: (typeof EXPORT_SCALES)[number];
+  exportScales: ReadonlyArray<(typeof EXPORT_SCALES)[number]>;
   setExportScale: Dispatch<SetStateAction<(typeof EXPORT_SCALES)[number]>>;
   exportFilename: string;
   setExportFilename: Dispatch<SetStateAction<string>>;
@@ -38,6 +39,7 @@ export function PixelPencilModals({
   handleCloseSaveDialog,
   handleConfirmSave,
   exportScale,
+  exportScales,
   setExportScale,
   exportFilename,
   setExportFilename,
@@ -96,7 +98,7 @@ export function PixelPencilModals({
                   Export size
                 </span>
                 <div className="flex gap-2">
-                  {EXPORT_SCALES.map((scale) => {
+                  {exportScales.map((scale) => {
                     const isSelected = exportScale === scale;
                     return (
                       <button

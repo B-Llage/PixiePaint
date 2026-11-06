@@ -307,3 +307,14 @@ export function composeInto(
     }
   }
 }
+
+/** An `ImageData` over the buffer's own memory (no copy), ready for `putImageData`. */
+export function imageDataFromBuffer(buffer: PixelBuffer): ImageData {
+  // Pixel buffers are always backed by a plain ArrayBuffer (never shared memory).
+  const bytes = new Uint8ClampedArray(
+    buffer.data.buffer as ArrayBuffer,
+    buffer.data.byteOffset,
+    buffer.data.byteLength,
+  );
+  return new ImageData(bytes, buffer.width, buffer.height);
+}

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { unpackColor } from "../pixel-buffer";
+import { imageDataFromBuffer } from "../pixel-buffer";
 import type { Layer } from "../PixelPencilTypes";
 
 const LAYER_PREVIEW_MAX_SIZE = 64; // px, longest side of a layer thumbnail
@@ -28,12 +28,14 @@ export function useLayerPreviews(
 ): Record<string, string> {
   const [generated, setGenerated] = useState<Record<string, string>>(NO_PREVIEWS);
   const hasArtwork = layers.length > 0 && gridWidth > 0 && gridHeight > 0;
+  // Offscreen canvas the layer bytes are uploaded to; reused across renders, resized with the grid.
+  const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     if (!hasArtwork || typeof window === "undefined") return;
     let cancelled = false;
     const frame = window.requestAnimationFrame(() => {
-      const previews = renderLayerPreviews(layers, gridWidth, gridHeight);
+      const previews = renderLayerPreviews(layers, gridWidth, gridHeight, sourceCanvasRef);
       if (previews && !cancelled) {
         setGenerated(previews);
       }
@@ -60,28 +62,36 @@ function renderLayerPreviews(
   layers: readonly Layer[],
   gridWidth: number,
   gridHeight: number,
+  sourceCanvasRef: { current: HTMLCanvasElement | null },
 ): Record<string, string> | null {
   const maxDimension = Math.max(gridWidth, gridHeight);
-  const scale = Math.max(1, Math.floor(LAYER_PREVIEW_MAX_SIZE / maxDimension));
+  const thumbWidth = thumbnailLength(gridWidth, maxDimension);
+  const thumbHeight = thumbnailLength(gridHeight, maxDimension);
   const canvas = document.createElement("canvas");
-  canvas.width = gridWidth * scale;
-  canvas.height = gridHeight * scale;
+  canvas.width = thumbWidth;
+  canvas.height = thumbHeight;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
 
-  ctx.imageSmoothingEnabled = false;
+  const source = sourceCanvasRef.current ?? document.createElement("canvas");
+  sourceCanvasRef.current = source;
+  if (source.width !== gridWidth) source.width = gridWidth;
+  if (source.height !== gridHeight) source.height = gridHeight;
+  const sourceCtx = source.getContext("2d");
+  if (!sourceCtx) return null;
 
-  const checkerSize = Math.max(scale, 2);
+  const checkerSize = Math.max(Math.floor(thumbWidth / gridWidth), 2);
   const previews: Record<string, string> = {};
 
   const drawCheckerboard = () => {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.globalAlpha = 1;
+    ctx.clearRect(0, 0, thumbWidth, thumbHeight);
     ctx.fillStyle = "#e4e4e7";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, thumbWidth, thumbHeight);
     ctx.fillStyle = "#f4f4f5";
-    for (let y = 0; y < canvas.height; y += checkerSize) {
+    for (let y = 0; y < thumbHeight; y += checkerSize) {
       const offset = (Math.floor(y / checkerSize) % 2) * checkerSize;
-      for (let x = offset; x < canvas.width; x += checkerSize * 2) {
+      for (let x = offset; x < thumbWidth; x += checkerSize * 2) {
         ctx.fillRect(x, y, checkerSize, checkerSize);
       }
     }
@@ -89,17 +99,22 @@ function renderLayerPreviews(
 
   for (const layer of layers) {
     drawCheckerboard();
+    // One upload of the layer's own bytes, then one scaled blit.
+    sourceCtx.putImageData(imageDataFromBuffer(layer.pixels), 0, 0);
+    ctx.imageSmoothingEnabled = false;
     ctx.globalAlpha = layer.visible ? 1 : 0.4;
-    const { data } = layer.pixels;
-    for (let index = 0; index < data.length; index += 1) {
-      const color = unpackColor(data[index]);
-      if (color === null || color === "transparent") continue;
-      ctx.fillStyle = color;
-      ctx.fillRect((index % gridWidth) * scale, Math.floor(index / gridWidth) * scale, scale, scale);
-    }
+    ctx.drawImage(source, 0, 0, gridWidth, gridHeight, 0, 0, thumbWidth, thumbHeight);
     ctx.globalAlpha = 1;
     previews[layer.id] = canvas.toDataURL("image/png");
   }
 
   return previews;
+}
+
+/** Whole-number scale for small grids; proportional shrink once the grid exceeds the thumbnail size. */
+function thumbnailLength(length: number, maxDimension: number): number {
+  if (maxDimension <= LAYER_PREVIEW_MAX_SIZE) {
+    return length * Math.floor(LAYER_PREVIEW_MAX_SIZE / maxDimension);
+  }
+  return Math.max(1, Math.round((length * LAYER_PREVIEW_MAX_SIZE) / maxDimension));
 }
