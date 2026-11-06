@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 
 import type { Layer } from "../PixelPencilTypes";
@@ -7,32 +7,30 @@ import type { DirtyRect, PixelBuffer } from "../pixel-buffer";
 
 type Params = { layersRef: RefObject<Layer[]>; width: number; height: number };
 
-function buildComposite(layers: Layer[], width: number, height: number): PixelBuffer {
-  const buffer = createBuffer(width, height);
-  // Layers may briefly have another size while a resize propagates; skip them.
-  const matching = layers.filter((l) => l.pixels.width === width && l.pixels.height === height);
-  composeInto(buffer, matching, null);
-  return buffer;
-}
-
 /**
  * Owns the flattened composite of all visible layers. `recompose(rect)` is
  * bounded by the rect; the renderer reads `dirtyRef` and clears it after upload.
  */
 export function useComposite({ layersRef, width, height }: Params) {
-  const compositeRef = useRef<PixelBuffer>(null as unknown as PixelBuffer);
+  const composite = useMemo(() => createBuffer(width, height), [width, height]);
+  const compositeRef = useRef<PixelBuffer>(composite);
   const dirtyRef = useRef<DirtyRect | null>(null);
-  const [builtFor, setBuiltFor] = useState<{ width: number; height: number } | null>(null);
   const [compositeVersion, setCompositeVersion] = useState(0);
 
-  // Adjust-state-during-render: rebuild synchronously so no frame sees a
-  // composite of the wrong size, then schedule the version bump.
-  if (!builtFor || builtFor.width !== width || builtFor.height !== height) {
-    compositeRef.current = buildComposite(layersRef.current, width, height);
-    dirtyRef.current = { x: 0, y: 0, width, height };
-    setBuiltFor({ width, height });
+  // A new buffer (first mount or size change) is fully composed, marked fully
+  // dirty, and announced via the version bump.
+  useEffect(() => {
+    compositeRef.current = composite;
+    // Layers may briefly have another size while a resize propagates; skip them.
+    const matching = layersRef.current.filter(
+      (l) => l.pixels.width === composite.width && l.pixels.height === composite.height,
+    );
+    composeInto(composite, matching, null);
+    dirtyRef.current = { x: 0, y: 0, width: composite.width, height: composite.height };
+    // The version must change once the new buffer has been composed so consumers re-render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCompositeVersion((v) => v + 1);
-  }
+  }, [composite, layersRef]);
 
   const recompose = useCallback(
     (rect: DirtyRect | null) => {
@@ -45,5 +43,5 @@ export function useComposite({ layersRef, width, height }: Params) {
     [layersRef],
   );
 
-  return { compositeRef, compositeVersion, dirtyRef, recompose };
+  return { composite, compositeRef, compositeVersion, dirtyRef, recompose };
 }
