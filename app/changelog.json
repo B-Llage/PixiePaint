@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.4.0",
+    "title": "Large Canvas Performance",
+    "changes": [
+      "Draw, fill, move, undo, and export stay responsive on canvases up to 2048 by 2048 pixels.",
+      "Type any grid width or height from 1 to 2048 in Settings.",
+      "Layer thumbnails stay readable on large canvases."
+    ]
+  },
+  {
     "version": "0.3.1",
     "title": "Tool Pointers and Hotkey Fix",
     "changes": [
