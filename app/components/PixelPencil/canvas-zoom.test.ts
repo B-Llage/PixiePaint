@@ -1,21 +1,56 @@
 import { describe, expect, it } from "vitest";
 
-import { clampZoomScale, getFitZoomScale, getNextZoomScale } from "./canvas-zoom";
+import {
+  clampZoomScale,
+  FIT_ZOOM_MAX_PADDING,
+  FIT_ZOOM_MIN_PADDING,
+  FIT_ZOOM_PADDING_RATIO,
+  getFitZoomPadding,
+  getFitZoomScale,
+  getNextZoomScale,
+} from "./canvas-zoom";
+
+describe("getFitZoomPadding", () => {
+  it("scales with the viewport's shorter side within its clamp range", () => {
+    expect(getFitZoomPadding(1200, 800)).toBeCloseTo(800 * FIT_ZOOM_PADDING_RATIO);
+    expect(getFitZoomPadding(300, 200)).toBe(FIT_ZOOM_MIN_PADDING);
+    expect(getFitZoomPadding(4000, 3000)).toBe(FIT_ZOOM_MAX_PADDING);
+  });
+
+  it("never takes more than a quarter of a tiny viewport", () => {
+    expect(getFitZoomPadding(40, 40)).toBe(10);
+  });
+
+  it("is zero before the viewport is measured", () => {
+    expect(getFitZoomPadding(0, 0)).toBe(0);
+  });
+});
 
 describe("getFitZoomScale", () => {
-  it("returns a scale that fits a 2000x2000 canvas in a narrow viewport", () => {
+  it("fits a 2000x2000 canvas in a narrow viewport with padding on every side", () => {
+    const padding = getFitZoomPadding(360, 500);
+    expect(padding).toBeGreaterThan(0);
     const scale = getFitZoomScale(2000, 2000, 360, 500, 1);
-    expect(2000 * scale).toBeLessThanOrEqual(360);
-    expect(2000 * scale).toBeCloseTo(360);
+    expect(2000 * scale).toBeCloseTo(360 - padding * 2);
+    expect(2000 * scale).toBeLessThanOrEqual(500 - padding * 2);
   });
 
-  it("fits the limiting axis of a wide canvas", () => {
+  it("pads the limiting axis of a wide canvas", () => {
+    const padding = getFitZoomPadding(1200, 800);
     const scale = getFitZoomScale(2000, 100, 1200, 800, 4);
-    expect(2000 * 4 * scale).toBeCloseTo(1200);
-    expect(100 * 4 * scale).toBeLessThanOrEqual(800);
+    expect(2000 * 4 * scale).toBeCloseTo(1200 - padding * 2);
+    expect(100 * 4 * scale).toBeLessThanOrEqual(800 - padding * 2);
   });
 
-  it("never exceeds 1 when the canvas already fits", () => {
+  it("goes below 1 when the default view fills the viewport edge to edge", () => {
+    // 16 cells of 16px fill a 256px viewport exactly, leaving no margin.
+    const scale = getFitZoomScale(16, 16, 256, 256, 16);
+    const padding = getFitZoomPadding(256, 256);
+    expect(scale).toBeLessThan(1);
+    expect(16 * 16 * scale).toBeCloseTo(256 - padding * 2);
+  });
+
+  it("never exceeds 1 when the canvas already fits with padding", () => {
     expect(getFitZoomScale(16, 16, 800, 800, 10)).toBe(1);
   });
 

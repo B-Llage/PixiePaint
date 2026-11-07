@@ -1,6 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import { getFitZoomPadding } from "../canvas-zoom";
 import { MAX_ZOOM_SCALE } from "../PixelPencil.constants";
 import { useCanvasViewport, type CanvasViewportOptions } from "./useCanvasViewport";
 
@@ -118,27 +119,29 @@ describe("useCanvasViewport", () => {
     expect(hook.result.current.canvasScroll).toEqual(zoomedPan);
   });
 
-  it("zooms out by halvings until the whole overflowing artwork fits, then centers it", () => {
+  it("zooms out by halvings until the whole overflowing artwork fits with padding, then centers it", () => {
     // 2048 cells at 4px is 8192px: far larger than a 600x400 viewport at 1x.
     const { hook, resize } = setup({ gridWidth: 2048, gridHeight: 2048, canvasPixelSize: 4 });
     resize(600, 400);
+    const padding = getFitZoomPadding(600, 400);
+    expect(padding).toBeGreaterThan(0);
     expect(hook.result.current.contentWidth).toBe(8192);
-    expect(hook.result.current.minZoomScale).toBeCloseTo(400 / 8192);
+    expect(hook.result.current.minZoomScale).toBeCloseTo((400 - padding * 2) / 8192);
 
     act(() => hook.result.current.zoomAtClientPoint("out", 1, 300, 300));
     expect(hook.result.current.zoomScale).toBe(0.5);
 
     act(() => hook.result.current.zoomAtClientPoint("out", 20, 300, 300));
     const { contentWidth, contentHeight, canvasScroll, renderOffsetX, renderOffsetY } = hook.result.current;
-    expect(contentHeight).toBeCloseTo(400);
-    expect(contentWidth).toBeLessThanOrEqual(600);
+    expect(contentHeight).toBeCloseTo(400 - padding * 2);
+    expect(contentWidth).toBeLessThanOrEqual(600 - padding * 2);
     expect(canvasScroll).toEqual({ x: 0, y: 0 });
     expect(renderOffsetX).toBeCloseTo((600 - contentWidth) / 2);
-    expect(renderOffsetY).toBeCloseTo(0);
+    expect(renderOffsetY).toBeCloseTo(padding);
 
     // Already at the fit scale: further zoom out changes nothing.
     act(() => hook.result.current.zoomAtClientPoint("out", 1, 300, 300));
-    expect(hook.result.current.contentHeight).toBeCloseTo(400);
+    expect(hook.result.current.contentHeight).toBeCloseTo(400 - padding * 2);
     expect(hook.result.current.canvasScroll).toEqual({ x: 0, y: 0 });
 
     act(() => hook.result.current.zoomAtClientPoint("in", 20, 300, 300));
@@ -149,12 +152,28 @@ describe("useCanvasViewport", () => {
     const { hook, resize } = setup({ gridWidth: 256, gridHeight: 256, canvasPixelSize: 4 });
     resize(200, 200);
     act(() => hook.result.current.zoomAtClientPoint("out", 10, 100, 100));
-    expect(hook.result.current.contentWidth).toBeCloseTo(200);
+    expect(hook.result.current.contentWidth).toBeCloseTo(200 - getFitZoomPadding(200, 200) * 2);
 
     resize(400, 400);
-    expect(hook.result.current.contentWidth).toBeCloseTo(400);
+    expect(hook.result.current.contentWidth).toBeCloseTo(400 - getFitZoomPadding(400, 400) * 2);
     resize(2000, 2000);
     expect(hook.result.current.zoomScale).toBe(1);
+  });
+
+  it("lets a canvas that fills the viewport at 1x zoom out to show padding on every side", () => {
+    // 16 cells at 16px fill a 256x256 viewport edge to edge at 1x.
+    const { hook, resize } = setup();
+    resize(256, 256);
+    expect(hook.result.current.contentWidth).toBe(256);
+    expect(hook.result.current.minZoomScale).toBeLessThan(1);
+
+    act(() => hook.result.current.zoomAtClientPoint("out", 1, 100, 100));
+    const padding = getFitZoomPadding(256, 256);
+    const { contentWidth, contentHeight, renderOffsetX, renderOffsetY } = hook.result.current;
+    expect(contentWidth).toBeCloseTo(256 - padding * 2);
+    expect(contentHeight).toBeCloseTo(256 - padding * 2);
+    expect(renderOffsetX).toBeCloseTo(padding);
+    expect(renderOffsetY).toBeCloseTo(padding);
   });
 
   it("keeps a zoom-created offset beyond the usual bounds until the viewport resizes", () => {
