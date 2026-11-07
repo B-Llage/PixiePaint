@@ -149,6 +149,50 @@ function checkerPattern(ctx: CanvasRenderingContext2D, width: number, height: nu
   return pattern;
 }
 
+// Above this many visible checkers, per-checker fills give way to one scaled
+// draw of a cached checkerboard bitmap (one pixel per cell). That happens at
+// fractional zoom levels such as the fit-to-viewport zoom of a large grid.
+const MAX_CHECKER_FILLS = 4096;
+
+// The cell-resolution checkerboard bitmap per context, keyed by its layout.
+const checkerBitmaps = new WeakMap<
+  CanvasRenderingContext2D,
+  { width: number; height: number; checkerSize: number; canvas: HTMLCanvasElement }
+>();
+
+/** RGBA bytes of a checkerboard with one pixel per cell. */
+export function checkerboardBitmapData(width: number, height: number, checkerSize: number): Uint8ClampedArray<ArrayBuffer> {
+  const data = new Uint8ClampedArray(new ArrayBuffer(width * height * 4));
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 4;
+      const rgb = isLightChecker(x, y, checkerSize) ? LIGHT_RGB : DARK_RGB;
+      data[offset] = rgb[0];
+      data[offset + 1] = rgb[1];
+      data[offset + 2] = rgb[2];
+      data[offset + 3] = 255;
+    }
+  }
+  return data;
+}
+
+function checkerBitmap(ctx: CanvasRenderingContext2D, grid: GridSize, checkerSize: number): HTMLCanvasElement | null {
+  const cached = checkerBitmaps.get(ctx);
+  if (cached && cached.width === grid.width && cached.height === grid.height && cached.checkerSize === checkerSize) {
+    return cached.canvas;
+  }
+  const canvas = createCanvas(grid.width, grid.height);
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.putImageData(
+    new ImageData(checkerboardBitmapData(grid.width, grid.height, checkerSize), grid.width, grid.height),
+    0,
+    0,
+  );
+  checkerBitmaps.set(ctx, { width: grid.width, height: grid.height, checkerSize, canvas });
+  return canvas;
+}
+
 const isWholePixels = (value: number) => value >= 1 && Math.abs(value - Math.round(value)) < 1e-6;
 
 /**
@@ -156,6 +200,8 @@ const isWholePixels = (value: number) => value >= 1 && Math.abs(value - Math.rou
  * cells per checker). Uses one unscaled pattern fill aligned to the artwork
  * origin when a checker is a whole number of device pixels, and one fill per
  * checker otherwise (fractional zoom, huge checkers, or no pattern support).
+ * When that would mean more than `MAX_CHECKER_FILLS` fills, it scales a cached
+ * one-pixel-per-cell bitmap instead, so the cost stays bounded by the viewport.
  */
 export function drawCheckerboard(
   ctx: CanvasRenderingContext2D,
@@ -190,6 +236,15 @@ export function drawCheckerboard(
   const firstY = Math.floor(visible.y / size);
   const endX = visible.x + visible.width;
   const endY = visible.y + visible.height;
+  const checkerCount = (Math.ceil(endX / size) - firstX) * (Math.ceil(endY / size) - firstY);
+  if (checkerCount > MAX_CHECKER_FILLS) {
+    const bitmap = checkerBitmap(ctx, grid, size);
+    if (bitmap) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(bitmap, visible.x, visible.y, visible.width, visible.height, area.x, area.y, area.width, area.height);
+      return;
+    }
+  }
   for (let checkerY = firstY; checkerY * size < endY; checkerY += 1) {
     for (let checkerX = firstX; checkerX * size < endX; checkerX += 1) {
       const cells = intersectRect({ x: checkerX * size, y: checkerY * size, width: size, height: size }, visible);

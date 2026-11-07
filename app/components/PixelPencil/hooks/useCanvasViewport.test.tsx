@@ -102,7 +102,7 @@ describe("useCanvasViewport", () => {
     expect(hook.result.current.resolvePositionFromClientPoint(clientX, clientY)).toEqual(before);
   });
 
-  it("clamps zoom between 1 and the maximum scale and leaves the pan alone at the limits", () => {
+  it("clamps zoom between the fit scale (1 when the artwork fits) and the maximum, leaving the pan alone at the limits", () => {
     const { hook, resize } = setup();
     resize(400, 400);
     const pan = { ...hook.result.current.canvasScroll };
@@ -116,6 +116,45 @@ describe("useCanvasViewport", () => {
     const zoomedPan = { ...hook.result.current.canvasScroll };
     act(() => hook.result.current.zoomAtClientPoint("in", 1, 100, 100));
     expect(hook.result.current.canvasScroll).toEqual(zoomedPan);
+  });
+
+  it("zooms out by halvings until the whole overflowing artwork fits, then centers it", () => {
+    // 2048 cells at 4px is 8192px: far larger than a 600x400 viewport at 1x.
+    const { hook, resize } = setup({ gridWidth: 2048, gridHeight: 2048, canvasPixelSize: 4 });
+    resize(600, 400);
+    expect(hook.result.current.contentWidth).toBe(8192);
+    expect(hook.result.current.minZoomScale).toBeCloseTo(400 / 8192);
+
+    act(() => hook.result.current.zoomAtClientPoint("out", 1, 300, 300));
+    expect(hook.result.current.zoomScale).toBe(0.5);
+
+    act(() => hook.result.current.zoomAtClientPoint("out", 20, 300, 300));
+    const { contentWidth, contentHeight, canvasScroll, renderOffsetX, renderOffsetY } = hook.result.current;
+    expect(contentHeight).toBeCloseTo(400);
+    expect(contentWidth).toBeLessThanOrEqual(600);
+    expect(canvasScroll).toEqual({ x: 0, y: 0 });
+    expect(renderOffsetX).toBeCloseTo((600 - contentWidth) / 2);
+    expect(renderOffsetY).toBeCloseTo(0);
+
+    // Already at the fit scale: further zoom out changes nothing.
+    act(() => hook.result.current.zoomAtClientPoint("out", 1, 300, 300));
+    expect(hook.result.current.contentHeight).toBeCloseTo(400);
+    expect(hook.result.current.canvasScroll).toEqual({ x: 0, y: 0 });
+
+    act(() => hook.result.current.zoomAtClientPoint("in", 20, 300, 300));
+    expect(hook.result.current.zoomScale).toBe(MAX_ZOOM_SCALE);
+  });
+
+  it("raises a fit zoom when the viewport grows so the artwork still fills it", () => {
+    const { hook, resize } = setup({ gridWidth: 256, gridHeight: 256, canvasPixelSize: 4 });
+    resize(200, 200);
+    act(() => hook.result.current.zoomAtClientPoint("out", 10, 100, 100));
+    expect(hook.result.current.contentWidth).toBeCloseTo(200);
+
+    resize(400, 400);
+    expect(hook.result.current.contentWidth).toBeCloseTo(400);
+    resize(2000, 2000);
+    expect(hook.result.current.zoomScale).toBe(1);
   });
 
   it("keeps a zoom-created offset beyond the usual bounds until the viewport resizes", () => {

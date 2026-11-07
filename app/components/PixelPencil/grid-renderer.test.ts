@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   cellToDevice,
+  checkerboardBitmapData,
   createCompositeSurface,
   drawCheckerboard,
   drawComposite,
@@ -274,6 +275,26 @@ describe("drawCheckerboard", () => {
     expect(fills[1].fillStyle).toBe(TRANSPARENT_DARK);
   });
 
+  it("scales one cached bitmap instead of a fill per checker for a zoomed-out large grid", () => {
+    const context = createContextStub({ pattern: true });
+    const grid = { width: 2048, height: 2048 };
+    const visible = { x: 0, y: 0, width: 2048, height: 2048 };
+    // The fit zoom of a 2048 grid in a ~580px viewport: a fractional sub-pixel cell.
+    const fitView = view({ displayCellSize: 580 / 2048, scaleX: 2, scaleY: 2 });
+    drawCheckerboard(asContext(context), grid, fitView, visible, 1);
+    drawCheckerboard(asContext(context), grid, fitView, visible, 1);
+
+    expect(callsNamed(context, "fillRect")).toHaveLength(0);
+    const draws = callsNamed(context, "drawImage");
+    expect(draws).toHaveLength(2);
+    expect(draws[0].fillStyle).toBe(false);
+    expect(draws[0].args.slice(1)).toEqual([0, 0, 2048, 2048, 0, 0, 1160, 1160]);
+    // Built once and reused while the grid and checker size stay the same.
+    expect(draws[1].args[0]).toBe(draws[0].args[0]);
+    const bitmap = draws[0].args[0] as HTMLCanvasElement;
+    expect([bitmap.width, bitmap.height]).toEqual([2048, 2048]);
+  });
+
   it("falls back to one fill per checker when patterns are unavailable", () => {
     const context = createContextStub();
     drawCheckerboard(asContext(context), { width: 4, height: 4 }, view({ originX: 30, originY: 30 }), { x: 0, y: 0, width: 4, height: 4 }, 2);
@@ -281,6 +302,21 @@ describe("drawCheckerboard", () => {
     expect(fills).toHaveLength(4);
     expect(fills[0]).toMatchObject({ args: [30, 30, 20, 20], fillStyle: TRANSPARENT_LIGHT });
     expect(fills[1]).toMatchObject({ args: [50, 30, 20, 20], fillStyle: TRANSPARENT_DARK });
+  });
+});
+
+describe("checkerboardBitmapData", () => {
+  it("alternates checker colors per checker, one pixel per cell", () => {
+    const light = [0xd4, 0xd4, 0xd8, 255];
+    const dark = [0x9c, 0xa3, 0xaf, 255];
+    expect(TRANSPARENT_LIGHT).toBe("#d4d4d8");
+    expect(TRANSPARENT_DARK).toBe("#9ca3af");
+    const data = checkerboardBitmapData(4, 2, 2);
+    const pixel = (x: number, y: number) => Array.from(data.slice((y * 4 + x) * 4, (y * 4 + x) * 4 + 4));
+    expect(pixel(0, 0)).toEqual(light);
+    expect(pixel(1, 1)).toEqual(light);
+    expect(pixel(2, 0)).toEqual(dark);
+    expect(pixel(3, 1)).toEqual(dark);
   });
 });
 
