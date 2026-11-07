@@ -1384,7 +1384,7 @@ export function PixelPencil() {
         </section>
         <div className="flex flex-1 min-h-0 lg:max-h-full">
           <aside className="hidden md:flex md:w-64 lg:w-72 flex-col border-r border-zinc-900 bg-zinc-950">
-            <div className="min-h-0 flex-1 panel-scroll overflow-y-scroll p-4">
+            <div className="min-h-0 flex-1 panel-scroll overflow-y-auto p-4">
               <LayersPanel
                 layers={layers}
                 activeLayerId={activeLayerId}
@@ -1489,7 +1489,7 @@ export function PixelPencil() {
                       Close
                     </button>
                   </div>
-                  <div className="min-h-0 flex-1 panel-scroll overflow-y-scroll overscroll-contain p-4">
+                  <div className="min-h-0 flex-1 panel-scroll overflow-y-auto overscroll-contain p-4">
                     {mobilePanel === "layers" ? (
                       <LayersPanel
                         layers={layers}

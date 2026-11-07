@@ -81,12 +81,16 @@ body {
 
 
 /*
- * Panel scrollers keep a permanent scrollbar gutter (overflow-y: scroll) so the
- * panel never narrows when the list grows. Safari paints an empty native track
- * in its light default even under color-scheme: dark, so the track is styled
- * transparent and the thumb in the panel's own greys.
+ * Panel scrollers reserve a permanent scrollbar gutter (scrollbar-gutter:
+ * stable) so the panel never narrows when the list grows. They use
+ * overflow-y: auto, not scroll: Safari paints a disabled scrollbar in its light
+ * default once the content stops overflowing, even under color-scheme: dark,
+ * whereas with auto the empty gutter is only reserved space that shows the
+ * panel background. Thumb and track use the panel's own greys when a
+ * scrollbar does appear.
  */
 .panel-scroll {
+  scrollbar-gutter: stable;
   scrollbar-color: #52525b transparent;
 }
 

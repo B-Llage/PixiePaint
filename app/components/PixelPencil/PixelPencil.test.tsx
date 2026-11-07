@@ -1007,17 +1007,18 @@ describe("PixelPencil controls", () => {
 });
 
 describe("PixelPencil layers sidebar", () => {
-  it("always reserves the scrollbar so adding layers never narrows the panel", () => {
+  it("reserves a stable scrollbar gutter so adding or removing layers never narrows the panel", () => {
     render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
     const addLayer = screen.getAllByRole("button", { name: "Add Layer" })[0];
     const scroller = addLayer.closest("[class*='overflow-y-']");
     expect(scroller).not.toBeNull();
-    expect(scroller?.className).toContain("overflow-y-scroll");
-    expect(scroller?.className).not.toContain("overflow-y-auto");
-    // Safari paints an empty native track light; the panel styles its own transparent track.
     expect(scroller?.className).toContain("panel-scroll");
+    // overflow-y: scroll makes Safari paint a light disabled scrollbar once the
+    // list stops overflowing; auto plus a stable gutter keeps the width without it.
+    expect(scroller?.className).toContain("overflow-y-auto");
+    expect(scroller?.className).not.toContain("overflow-y-scroll");
     const css = readFileSync(join(__dirname, "../../globals.css"), "utf8");
+    expect(css).toMatch(/\.panel-scroll \{\s*scrollbar-gutter: stable;\s*scrollbar-color: #52525b transparent;/);
     expect(css).toMatch(/\.panel-scroll::-webkit-scrollbar-track \{\s*background: transparent;/);
-    expect(css).toMatch(/\.panel-scroll \{\s*scrollbar-color: #52525b transparent;/);
   });
 });
