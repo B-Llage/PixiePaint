@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PixelPencilSettingsProvider, usePixelPencilSettings } from "./PixelPencilSettingsContext";
+import { clampGridDimension, PixelPencilSettingsProvider, usePixelPencilSettings } from "./PixelPencilSettingsContext";
 import { SettingsModal } from "../Settings/SettingsModal";
 
 function SettingsProbe() {
@@ -21,6 +21,8 @@ function SettingsProbe() {
         })}
       </output>
       <button onClick={() => settings.setGridWidth(64)}>Set width</button>
+      <button onClick={() => settings.setGridWidth(5000)}>Set huge width</button>
+      <button onClick={() => settings.setGridWidth(2.5)}>Set fractional width</button>
       <button onClick={() => settings.setDimStrokePreview(true)}>Dim strokes</button>
     </>
   );
@@ -77,7 +79,7 @@ describe("PixelPencilSettingsProvider", () => {
 
   it("rejects unsupported values and persists valid changes", async () => {
     window.localStorage.setItem("pixel-pencil-settings", JSON.stringify({
-      gridWidth: 999,
+      gridWidth: 4096,
       gridHeight: 16,
       checkerSize: 0,
       showPixelGrid: "yes",
@@ -101,6 +103,36 @@ describe("PixelPencilSettingsProvider", () => {
     fireEvent.click(screen.getByRole("button", { name: "Dim strokes" }));
     await waitFor(() => expect(readSettings().dimStrokePreview).toBe(true));
     await waitFor(() => expect(JSON.parse(window.localStorage.getItem("pixel-pencil-settings") ?? "{}").dimStrokePreview).toBe(true));
+  });
+
+  it("hydrates any integer grid size from 1 to 2048 and falls back to 32 otherwise", async () => {
+    window.localStorage.setItem("pixel-pencil-settings", JSON.stringify({ gridWidth: 2000, gridHeight: 4096 }));
+    const first = render(<PixelPencilSettingsProvider><SettingsProbe /></PixelPencilSettingsProvider>);
+    await waitFor(() => expect(readSettings()).toMatchObject({ gridWidth: 2000, gridHeight: 32 }));
+    first.unmount();
+
+    window.localStorage.setItem("pixel-pencil-settings", JSON.stringify({ gridWidth: "abc", gridHeight: 1 }));
+    render(<PixelPencilSettingsProvider><SettingsProbe /></PixelPencilSettingsProvider>);
+    await waitFor(() => expect(readSettings()).toMatchObject({ gridWidth: 32, gridHeight: 1 }));
+  });
+
+  it("clamps setGridWidth to the allowed range", async () => {
+    render(<PixelPencilSettingsProvider><SettingsProbe /></PixelPencilSettingsProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Set width" }));
+    await waitFor(() => expect(readSettings().gridWidth).toBe(64));
+    fireEvent.click(screen.getByRole("button", { name: "Set huge width" }));
+    fireEvent.click(screen.getByRole("button", { name: "Set fractional width" }));
+    expect(readSettings().gridWidth).toBe(64);
+  });
+
+  it("clampGridDimension accepts only integers within range", () => {
+    expect(clampGridDimension(1)).toBe(1);
+    expect(clampGridDimension(2048)).toBe(2048);
+    expect(clampGridDimension(0)).toBeNull();
+    expect(clampGridDimension(2049)).toBeNull();
+    expect(clampGridDimension(3.5)).toBeNull();
+    expect(clampGridDimension("32")).toBeNull();
+    expect(clampGridDimension(NaN)).toBeNull();
   });
 
   it("recovers from malformed stored JSON", async () => {

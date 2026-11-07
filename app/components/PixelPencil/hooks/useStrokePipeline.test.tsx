@@ -1,17 +1,33 @@
 import { act, renderHook } from "@testing-library/react";
 import { useState } from "react";
-import type { SetStateAction } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { PreviewMask } from "../grid-geometry";
+import type { LayerEdit } from "../layer-edit";
+import { createBuffer, unpackColor, type DirtyRect } from "../pixel-buffer";
 import type { ToolId } from "../PixelPencilTools";
-import type { BrushShape, PixelValue } from "../PixelPencilTypes";
+import type { BrushShape } from "../PixelPencilTypes";
 import { useStrokePipeline } from "./useStrokePipeline";
 
 const GRID = 8;
 const CELL = 10;
-const TOTAL = GRID * GRID;
 
 const client = (x: number, y: number) => ({ clientX: x * CELL, clientY: y * CELL });
+
+/** The cells a preview mask marks, checking each lies inside the mask's bounds. */
+function previewCells(preview: PreviewMask | null): Set<number> | null {
+  if (preview === null) return null;
+  const cells = new Set<number>();
+  preview.mask.forEach((value, index) => {
+    if (value === 0) return;
+    const x = index % GRID;
+    const y = Math.floor(index / GRID);
+    const { bounds } = preview;
+    expect(x >= bounds.x && x < bounds.x + bounds.width && y >= bounds.y && y < bounds.y + bounds.height).toBe(true);
+    cells.add(index);
+  });
+  return cells;
+}
 
 type Props = { tool: ToolId; brushSize: number; brushShape: BrushShape; previewToolEffects: boolean };
 
@@ -30,8 +46,14 @@ function setup(initial: Partial<Props> = {}) {
       for (const frame of pending) frame(0);
     });
 
-  const pixelsRef = { current: new Array<PixelValue>(TOTAL).fill(null) };
-  const markModified = vi.fn();
+  const buffer = createBuffer(GRID, GRID);
+  /** Each edit's requested rect and the rect the mutation reported changed. */
+  const edits: { layerId: string; rect: DirtyRect; changed: DirtyRect | null }[] = [];
+  const editLayer = vi.fn((layerId: string, rect: DirtyRect, mutate: LayerEdit) => {
+    const changed = mutate(buffer);
+    edits.push({ layerId, rect, changed });
+    return changed;
+  });
   const finalizeAction = vi.fn();
   const setDrawValue = vi.fn();
   const setHoverIndexIfChanged = vi.fn();
@@ -46,23 +68,19 @@ function setup(initial: Partial<Props> = {}) {
 
   const hook = renderHook(
     (props: Props) => {
-      const [pathPreview, setPathPreview] = useState<Set<number> | null>(null);
+      const [pathPreview, setPathPreview] = useState<PreviewMask | null>(null);
       const [dragStartIndex, setDragStartIndex] = useState<number | null>(3);
-      const setActiveLayerPixels = (next: SetStateAction<PixelValue[]>) => {
-        pixelsRef.current = typeof next === "function" ? next(pixelsRef.current) : next;
-      };
       const api = useStrokePipeline({
         gridWidth: GRID,
         gridHeight: GRID,
         ...props,
-        activeLayerPixelsRef: pixelsRef,
-        setActiveLayerPixels,
+        activeLayerId: "layer",
+        editLayer,
         setPathPreview,
         setDragStartIndex,
         setDrawValue,
         setHoverIndexIfChanged,
         resolvePointerFromClientPoint,
-        markModified,
         finalizeAction,
       });
       return { api, pathPreview, dragStartIndex };
@@ -79,9 +97,9 @@ function setup(initial: Partial<Props> = {}) {
   );
 
   const painted = () =>
-    pixelsRef.current.flatMap((value, index) => (value === null ? [] : [index]));
+    Array.from(buffer.data).flatMap((value, index) => (unpackColor(value) === null ? [] : [index]));
 
-  return { hook, pixelsRef, painted, runFrames, markModified, finalizeAction, setDrawValue, setHoverIndexIfChanged };
+  return { hook, buffer, edits, painted, runFrames, finalizeAction, setDrawValue, setHoverIndexIfChanged };
 }
 
 afterEach(() => {
@@ -89,46 +107,69 @@ afterEach(() => {
 });
 
 describe("useStrokePipeline", () => {
-  it("paints the brush footprint and marks the action modified only when pixels change", () => {
-    const { hook, painted, markModified } = setup({ brushSize: 2 });
+  it("paints the brush footprint inside its bounds and reports a change only when pixels change", () => {
+    const { hook, buffer, edits, painted } = setup({ brushSize: 2 });
     act(() => hook.result.current.api.applyBrush(9, "#f00"));
     expect(painted()).toEqual([9, 10, 17, 18]);
-    expect(markModified).toHaveBeenCalledTimes(1);
+    expect(unpackColor(buffer.data[9])).toBe("#ff0000");
+    expect(edits).toEqual([
+      { layerId: "layer", rect: { x: 1, y: 1, width: 2, height: 2 }, changed: { x: 1, y: 1, width: 2, height: 2 } },
+    ]);
 
     act(() => hook.result.current.api.applyBrush(9, "#f00"));
-    expect(markModified).toHaveBeenCalledTimes(1);
+    expect(edits[1].changed).toBeNull();
   });
 
-  it("paints a path with the brush in one update and previews it", () => {
-    const { hook, painted, markModified } = setup();
+  it("clips the brush bounds at the grid edge and erases with null", () => {
+    const { hook, edits, painted } = setup({ brushSize: 3 });
+    act(() => hook.result.current.api.applyBrush(0, "#f00"));
+    expect(edits[0].rect).toEqual({ x: 0, y: 0, width: 2, height: 2 });
+    expect(painted()).toEqual([0, 1, 8, 9]);
+
+    act(() => hook.result.current.api.applyBrush(0, null));
+    expect(painted()).toEqual([]);
+  });
+
+  it("paints a path with the brush in one edit bounded by the path and previews it", () => {
+    const { hook, edits, painted } = setup();
     act(() => hook.result.current.api.applyLinePath([0, 1, 2], "#0f0"));
     expect(painted()).toEqual([0, 1, 2]);
-    expect(markModified).toHaveBeenCalledTimes(1);
-    expect(hook.result.current.api.buildLinePreview([0, 9])).toEqual(new Set([0, 9]));
+    expect(edits).toHaveLength(1);
+    expect(edits[0].rect).toEqual({ x: 0, y: 0, width: 3, height: 1 });
+    expect(previewCells(hook.result.current.api.buildLinePreview([0, 9]))).toEqual(new Set([0, 9]));
+    // The preview scratch is cleared over its last stamp, so a new build holds only its own cells.
+    expect(previewCells(hook.result.current.api.buildLinePreview([20]))).toEqual(new Set([20]));
 
     act(() => hook.result.current.api.applyLinePath([], "#0f0"));
+    expect(edits).toHaveLength(1);
     act(() => hook.result.current.api.applyLinePath([0, 1, 2], "#0f0"));
-    expect(markModified).toHaveBeenCalledTimes(1);
+    expect(edits[1].changed).toBeNull();
+
+    // The scratch mask is cleared between edits: a later path paints only its own cells.
+    act(() => hook.result.current.api.applyLinePath([16], "#00f"));
+    expect(painted()).toEqual([0, 1, 2, 16]);
+    expect(edits[2].rect).toEqual({ x: 0, y: 2, width: 1, height: 1 });
   });
 
   it("runs a freehand stroke: first cell on press, traced cells on commit, reset on stop", () => {
-    const { hook, painted, finalizeAction, setDrawValue } = setup();
+    const { hook, edits, painted, finalizeAction, setDrawValue } = setup();
     const api = () => hook.result.current.api;
     act(() => api().beginStroke({ index: 0, position: { x: 0.5, y: 0.5 } }, "#f00", true));
     expect(api().isDrawingRef.current).toBe(true);
     expect(api().lastPaintedIndexRef.current).toBe(0);
     expect(setDrawValue).toHaveBeenCalledWith("#f00");
     expect(painted()).toEqual([0]);
-    expect(hook.result.current.pathPreview).toEqual(new Set([0]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0]));
 
     act(() => api().appendStrokePoint({ x: 0.505, y: 0.5 }));
-    expect(hook.result.current.pathPreview).toEqual(new Set([0]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0]));
     act(() => api().appendStrokePoint({ x: 2.5, y: 0.5 }));
-    expect(hook.result.current.pathPreview).toEqual(new Set([0, 1, 2]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0, 1, 2]));
     expect(painted()).toEqual([0]);
 
     act(() => api().commitStrokeBuffer("#f00"));
     expect(painted()).toEqual([0, 1, 2]);
+    expect(edits[edits.length - 1].rect).toEqual({ x: 0, y: 0, width: 3, height: 1 });
 
     act(() => api().stopStroke());
     expect(api().isDrawingRef.current).toBe(false);
@@ -139,6 +180,66 @@ describe("useStrokePipeline", () => {
 
     act(() => api().commitStrokeBuffer("#f00"));
     expect(painted()).toEqual([0, 1, 2]);
+  });
+
+  it("grows the preview mask in place by only the new cells per step", () => {
+    const { hook } = setup();
+    const api = () => hook.result.current.api;
+    const count = () => previewCells(hook.result.current.pathPreview)?.size;
+    act(() => api().beginStroke({ index: 0, position: { x: 0.5, y: 0.5 } }, "#f00", true));
+    const first = hook.result.current.pathPreview;
+    expect(count()).toBe(1);
+    act(() => api().appendStrokePoint({ x: 1.5, y: 0.5 }));
+    expect(count()).toBe(2);
+    act(() => api().appendStrokePoint({ x: 2.5, y: 0.5 }));
+    expect(count()).toBe(3);
+    expect(hook.result.current.pathPreview?.mask).toBe(first?.mask);
+    // Re-tracing already traced cells changes nothing.
+    act(() => api().appendStrokePoint({ x: 1.5, y: 0.5 }));
+    expect(count()).toBe(3);
+    expect(hook.result.current.pathPreview?.bounds).toEqual({ x: 0, y: 0, width: 3, height: 1 });
+  });
+
+  it("commits the stroke as one edit over the stroke bounds and clears the mask", () => {
+    const { hook, edits, painted } = setup();
+    const api = () => hook.result.current.api;
+    act(() => api().beginStroke({ index: 0, position: { x: 0.5, y: 0.5 } }, "#f00", true));
+    const editsAfterPress = edits.length;
+    act(() => api().appendStrokePoint({ x: 3.5, y: 0.5 }));
+    act(() => api().appendStrokePoint({ x: 3.5, y: 2.5 }));
+    const preview = hook.result.current.pathPreview as PreviewMask;
+    const bounds = { ...preview.bounds };
+    act(() => api().commitStrokeBuffer("#f00"));
+    expect(edits).toHaveLength(editsAfterPress + 1);
+    expect(edits[edits.length - 1].rect).toEqual(bounds);
+    expect(bounds).toEqual({ x: 0, y: 0, width: 4, height: 3 });
+    expect(painted()).toEqual([0, 1, 2, 3, 11, 19]);
+    expect(preview.mask.every((v) => v === 0)).toBe(true);
+  });
+
+  it("keeps a wide brush stroke's edit rect within the brush-padded path bounds", () => {
+    const { hook, edits } = setup({ brushSize: 3 });
+    const api = () => hook.result.current.api;
+    act(() => api().beginStroke({ index: 3 * GRID + 3, position: { x: 3.5, y: 3.5 } }, "#f00", true));
+    act(() => api().appendStrokePoint({ x: 5.5, y: 3.5 }));
+    act(() => api().commitStrokeBuffer("#f00"));
+    expect(edits[edits.length - 1].rect).toEqual({ x: 2, y: 2, width: 5, height: 3 });
+  });
+
+  it("clears an abandoned stroke's mask and keeps line previews off the stroke mask", () => {
+    const { hook } = setup();
+    const api = () => hook.result.current.api;
+    act(() => api().beginStroke({ index: 0, position: { x: 0.5, y: 0.5 } }, "#f00", true));
+    act(() => api().appendStrokePoint({ x: 2.5, y: 0.5 }));
+    const strokeMask = (hook.result.current.pathPreview as PreviewMask).mask;
+    const line = api().buildLinePreview([40, 41]);
+    expect(line.mask).not.toBe(strokeMask);
+    expect(strokeMask.reduce((n, v) => n + v, 0)).toBe(3);
+    act(() => api().stopStroke());
+    expect(strokeMask.every((v) => v === 0)).toBe(true);
+    // A new stroke starts clean.
+    act(() => api().beginStroke({ index: 63, position: { x: 7.5, y: 7.5 } }, "#f00", true));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([63]));
   });
 
   it("does not preview a freehand stroke when previews are off", () => {
@@ -176,16 +277,16 @@ describe("useStrokePipeline", () => {
     act(() =>
       api().processDrawingSamples([client(1.5, 0.5), client(2.5, 0.5)] as unknown as PointerEvent[]),
     );
-    expect(hook.result.current.pathPreview).toEqual(new Set([0]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0]));
 
     runFrames();
-    expect(hook.result.current.pathPreview).toEqual(new Set([0, 1, 2]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0, 1, 2]));
     expect(setHoverIndexIfChanged).toHaveBeenLastCalledWith(2);
 
     // flushPointerQueue processes immediately, without waiting for a frame.
     act(() => api().processDrawingSamples([client(3.5, 0.5)] as unknown as PointerEvent[]));
     act(() => api().flushPointerQueue());
-    expect(hook.result.current.pathPreview).toEqual(new Set([0, 1, 2, 3]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0, 1, 2, 3]));
   });
 
   it("drops queued samples when the stroke has ended or the queue is cleared", () => {
@@ -199,7 +300,7 @@ describe("useStrokePipeline", () => {
     act(() => api().processDrawingSamples([client(1.5, 0.5)] as unknown as PointerEvent[]));
     act(() => api().clearPointerQueue());
     runFrames();
-    expect(hook.result.current.pathPreview).toEqual(new Set([0]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0]));
   });
 
   it("follows window pointer moves for the captured pointer while drawing freehand", () => {
@@ -224,16 +325,16 @@ describe("useStrokePipeline", () => {
     });
     move(2, 1.5);
     runFrames();
-    expect(hook.result.current.pathPreview).toEqual(new Set([0]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0]));
 
     const own = move(1, 2.5);
     runFrames();
-    expect(hook.result.current.pathPreview).toEqual(new Set([0, 1, 2]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0, 1, 2]));
     expect(own.defaultPrevented).toBe(true);
 
     hook.rerender({ tool: "line", brushSize: 1, brushShape: "square", previewToolEffects: true });
     move(1, 4.5);
     runFrames();
-    expect(hook.result.current.pathPreview).toEqual(new Set([0, 1, 2]));
+    expect(previewCells(hook.result.current.pathPreview)).toEqual(new Set([0, 1, 2]));
   });
 });

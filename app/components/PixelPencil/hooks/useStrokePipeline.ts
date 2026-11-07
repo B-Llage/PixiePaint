@@ -2,9 +2,19 @@ import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 
 import {
+  brushBounds,
+  clearMaskRect,
+  clearScratchMask,
   computeBrushIndices as computeBrushIndicesOnGrid,
+  createMask,
+  stampCells,
+  stampScratch,
   traceWorldSegment as traceWorldSegmentOnGrid,
+  type PreviewMask,
+  type ScratchMask,
 } from "../grid-geometry";
+import type { EditLayer } from "../layer-edit";
+import { fillCells, fillMask, toPackedValue, type DirtyRect } from "../pixel-buffer";
 import type { ToolId } from "../PixelPencilTools";
 import type { BrushShape, PixelValue } from "../PixelPencilTypes";
 
@@ -20,9 +30,12 @@ export type StrokePipelineOptions = {
   brushSize: number;
   brushShape: BrushShape;
   previewToolEffects: boolean;
-  activeLayerPixelsRef: RefObject<PixelValue[]>;
-  setActiveLayerPixels: (next: SetStateAction<PixelValue[]>) => void;
-  setPathPreview: Dispatch<SetStateAction<Set<number> | null>>;
+  /** The layer every brush edit writes to. */
+  activeLayerId: string;
+  /** Writes to a layer through the editor, which records history and recomposites. */
+  editLayer: EditLayer;
+  /** Shows (or with `null` hides) the path preview; the mask may be reused by later builds. */
+  setPathPreview: (next: PreviewMask | null) => void;
   setDragStartIndex: Dispatch<SetStateAction<number | null>>;
   setDrawValue: (value: PixelValue) => void;
   setHoverIndexIfChanged: (next: number | null) => void;
@@ -32,7 +45,6 @@ export type StrokePipelineOptions = {
     clientY: number,
     options?: { clamp?: boolean },
   ) => StrokePointer | null;
-  markModified: () => void;
   finalizeAction: () => void;
 };
 
@@ -45,12 +57,15 @@ export type StrokePipelineApi = {
   lastPaintedIndexRef: RefObject<number | null>;
   /** The brush footprint around a cell for the current size and shape. */
   computeBrushIndices: (centerIndex: number) => number[];
-  /** Paints the brush footprint at a cell and marks the action modified if anything changed. */
+  /** Paints the brush footprint at a cell through one `editLayer` call bounded by the brush square. */
   applyBrush: (index: number, value: PixelValue) => void;
-  /** Paints the brush footprint along a path in one update. */
+  /** Paints the brush footprint along a path in one `editLayer` call bounded by the stamped cells. */
   applyLinePath: (path: number[], value: PixelValue) => void;
-  /** The preview cells for a path drawn with the current brush. */
-  buildLinePreview: (path: number[]) => Set<number>;
+  /**
+   * The preview mask for a path drawn with the current brush. The mask is a
+   * scratch reused (and cleared over its previous bounds) by the next build.
+   */
+  buildLinePreview: (path: number[]) => PreviewMask;
   /** Captures the pointer on the canvas and remembers it for the stroke, even if capture fails. */
   capturePointer: (canvas: HTMLCanvasElement, pointerId: number) => void;
   /** Line and shape tools: arms drawing without painting, so pointer-up applies the path. */
@@ -59,6 +74,12 @@ export type StrokePipelineApi = {
   markLastPainted: (index: number | null) => void;
   /** Clears the drawing flags without touching pixels or previews, when the tool changes. */
   resetDrawingState: () => void;
+  /**
+   * Abandons any stroke and drops the canvas-sized masks so they reallocate at
+   * the new size, for when the grid is resized. Writes no pixels and leaves the
+   * history action to the caller.
+   */
+  resetForGrid: () => void;
   /**
    * Pencil and eraser: paints the first cell and, for a freehand stroke, starts
    * collecting the cells the pointer crosses for the preview and the final commit.
@@ -95,14 +116,13 @@ export function useStrokePipeline({
   brushSize,
   brushShape,
   previewToolEffects,
-  activeLayerPixelsRef,
-  setActiveLayerPixels,
+  activeLayerId,
+  editLayer,
   setPathPreview,
   setDragStartIndex,
   setDrawValue,
   setHoverIndexIfChanged,
   resolvePointerFromClientPoint,
-  markModified,
   finalizeAction,
 }: StrokePipelineOptions): StrokePipelineApi {
   const isDrawingRef = useRef(false);
@@ -112,6 +132,14 @@ export function useStrokePipeline({
   const activePointerIdRef = useRef<number | null>(null);
   const pointerQueueRef = useRef<WorldPoint[]>([]);
   const pointerRAFRef = useRef<number | null>(null);
+  /** Canvas-sized scratch mask for path and stroke commits; cleared over its bounds after each use. */
+  const scratchMaskRef = useRef<Uint8Array | null>(null);
+  /** Separate scratch mask for the path preview, which stays visible between commits. */
+  const previewMaskRef = useRef<ScratchMask | null>(null);
+  /** The freehand stroke's mask: grown by new cells while drawing, committed as one edit, then cleared. */
+  const strokeMaskRef = useRef<ScratchMask | null>(null);
+  /** The stroke mask as handed to `setPathPreview`; its bounds grow in place with the mask. */
+  const strokePreviewRef = useRef<PreviewMask | null>(null);
 
   useEffect(() => {
     const pointerQueue = pointerQueueRef.current;
@@ -132,71 +160,61 @@ export function useStrokePipeline({
 
   const applyBrush = useCallback(
     (index: number, value: PixelValue) => {
-      const indices = computeBrushIndices(index);
-      if (indices.length === 0) return;
+      const grid = { width: gridWidth, height: gridHeight };
+      const rect = brushBounds(grid, index, brushSize);
+      const packed = toPackedValue(value);
+      editLayer(activeLayerId, rect, (buffer) => fillCells(buffer, computeBrushIndices(index), packed));
+    },
+    [activeLayerId, brushSize, computeBrushIndices, editLayer, gridHeight, gridWidth],
+  );
 
-      let changed = false;
-      setActiveLayerPixels((prev) => {
-        const next = [...prev];
-
-        for (const target of indices) {
-          if (next[target] === value) continue;
-          next[target] = value;
-          changed = true;
-        }
-
-        if (!changed) {
-          return prev;
-        }
-
-        return next;
-      });
-
-      if (changed) {
-        markModified();
+  /** Stamps the brush footprint of every cell into the scratch mask and fills it in one edit. */
+  const fillFootprints = useCallback(
+    (cells: Iterable<number>, value: PixelValue) => {
+      const grid = { width: gridWidth, height: gridHeight };
+      let mask = scratchMaskRef.current;
+      if (!mask || mask.length !== gridWidth * gridHeight) {
+        mask = createMask(grid);
+        scratchMaskRef.current = mask;
+      }
+      let bounds: DirtyRect | null = null;
+      for (const cell of cells) {
+        bounds = stampCells(mask, grid, computeBrushIndices(cell), bounds);
+      }
+      if (!bounds) return;
+      const stamped = bounds;
+      const packed = toPackedValue(value);
+      try {
+        editLayer(activeLayerId, stamped, (buffer) => fillMask(buffer, mask, stamped, packed));
+      } finally {
+        clearMaskRect(mask, grid, stamped);
       }
     },
-    [computeBrushIndices, markModified, setActiveLayerPixels],
+    [activeLayerId, computeBrushIndices, editLayer, gridHeight, gridWidth],
   );
 
   const applyLinePath = useCallback(
-    (path: number[], value: PixelValue) => {
-      if (!path.length) return;
-      const current = activeLayerPixelsRef.current;
-      const next = [...current];
-      let changed = false;
+    (path: number[], value: PixelValue) => fillFootprints(path, value),
+    [fillFootprints],
+  );
 
-      for (const pathIndex of path) {
-        const indices = computeBrushIndices(pathIndex);
-        for (const target of indices) {
-          if (next[target] === value) continue;
-          next[target] = value;
-          changed = true;
-        }
+  /** Stamps every cell's brush footprint into the preview scratch mask, cleared over its last stamp first. */
+  const buildFootprintPreview = useCallback(
+    (cells: Iterable<number>): PreviewMask => {
+      const grid = { width: gridWidth, height: gridHeight };
+      const scratch = clearScratchMask(previewMaskRef.current, grid);
+      previewMaskRef.current = scratch;
+      for (const cell of cells) {
+        stampScratch(scratch, grid, computeBrushIndices(cell));
       }
-
-      if (!changed) {
-        return;
-      }
-
-      markModified();
-      setActiveLayerPixels(next);
+      return { mask: scratch.mask, bounds: scratch.bounds ?? { x: 0, y: 0, width: 0, height: 0 } };
     },
-    [activeLayerPixelsRef, computeBrushIndices, markModified, setActiveLayerPixels],
+    [computeBrushIndices, gridHeight, gridWidth],
   );
 
   const buildLinePreview = useCallback(
-    (path: number[]) => {
-      const preview = new Set<number>();
-      for (const index of path) {
-        const indices = computeBrushIndices(index);
-        for (const target of indices) {
-          preview.add(target);
-        }
-      }
-      return preview;
-    },
-    [computeBrushIndices],
+    (path: number[]) => buildFootprintPreview(path),
+    [buildFootprintPreview],
   );
 
   const traceWorldSegment = useCallback(
@@ -205,18 +223,31 @@ export function useStrokePipeline({
     [gridHeight, gridWidth],
   );
 
-  const buildPreviewFromAppliedCells = useCallback(
-    (cells: Iterable<number>) => {
-      const preview = new Set<number>();
+  /** Clears the stroke mask over its bounds, or lays out a fresh one when the grid size changed. */
+  const resetStrokeMask = useCallback(() => {
+    strokeMaskRef.current = clearScratchMask(strokeMaskRef.current, {
+      width: gridWidth,
+      height: gridHeight,
+    });
+    strokePreviewRef.current = null;
+  }, [gridHeight, gridWidth]);
+
+  /** Stamps brush footprints into the stroke mask and, with previews on, publishes the grown mask. */
+  const stampStrokeCells = useCallback(
+    (cells: number[]) => {
+      const scratch = strokeMaskRef.current;
+      if (!scratch) return;
+      const grid = { width: gridWidth, height: gridHeight };
       for (const cell of cells) {
-        const footprint = computeBrushIndices(cell);
-        for (const idx of footprint) {
-          preview.add(idx);
-        }
+        stampScratch(scratch, grid, computeBrushIndices(cell));
       }
-      return preview;
+      if (!previewToolEffects || !scratch.bounds) return;
+      const preview = strokePreviewRef.current ?? { mask: scratch.mask, bounds: scratch.bounds };
+      preview.bounds = scratch.bounds;
+      strokePreviewRef.current = preview;
+      setPathPreview(preview);
     },
-    [computeBrushIndices],
+    [computeBrushIndices, gridHeight, gridWidth, previewToolEffects, setPathPreview],
   );
 
   const capturePointer = useCallback((canvas: HTMLCanvasElement, pointerId: number) => {
@@ -247,6 +278,23 @@ export function useStrokePipeline({
     lastPaintedIndexRef.current = null;
   }, []);
 
+  const resetForGrid = useCallback(() => {
+    isDrawingRef.current = false;
+    activePointerIdRef.current = null;
+    lastPaintedIndexRef.current = null;
+    strokeWorldPointsRef.current = null;
+    strokeAppliedCellsRef.current = null;
+    strokePreviewRef.current = null;
+    scratchMaskRef.current = null;
+    previewMaskRef.current = null;
+    strokeMaskRef.current = null;
+    pointerQueueRef.current.length = 0;
+    if (pointerRAFRef.current !== null) {
+      window.cancelAnimationFrame(pointerRAFRef.current);
+      pointerRAFRef.current = null;
+    }
+  }, []);
+
   const startStroke = useCallback(
     (pointer: StrokePointer, nextValue: PixelValue) => {
       isDrawingRef.current = true;
@@ -261,30 +309,18 @@ export function useStrokePipeline({
     (pointer: StrokePointer, value: PixelValue, freehand: boolean) => {
       if (freehand) {
         strokeWorldPointsRef.current = [pointer.position];
-        const applied = new Set<number>();
-        applied.add(pointer.index);
-        strokeAppliedCellsRef.current = applied;
-        if (previewToolEffects) {
-          setPathPreview(buildPreviewFromAppliedCells(applied));
-        } else {
-          setPathPreview(null);
-        }
+        strokeAppliedCellsRef.current = new Set([pointer.index]);
+        resetStrokeMask();
+        setPathPreview(null);
+        stampStrokeCells([pointer.index]);
       } else {
         strokeWorldPointsRef.current = null;
         strokeAppliedCellsRef.current = null;
       }
 
       startStroke(pointer, value);
-      if (strokeAppliedCellsRef.current && freehand) {
-        strokeAppliedCellsRef.current.add(pointer.index);
-        if (previewToolEffects) {
-          setPathPreview(
-            buildPreviewFromAppliedCells(strokeAppliedCellsRef.current),
-          );
-        }
-      }
     },
-    [buildPreviewFromAppliedCells, previewToolEffects, setPathPreview, startStroke],
+    [resetStrokeMask, setPathPreview, stampStrokeCells, startStroke],
   );
 
   const appendStrokePoint = useCallback(
@@ -301,52 +337,33 @@ export function useStrokePipeline({
       }
       worldPoints.push(worldPoint);
       if (lastPoint) {
-        const segmentCells = traceWorldSegment(lastPoint, worldPoint);
-        if (segmentCells.length) {
-          const newCells: number[] = [];
-          for (const cell of segmentCells) {
-            if (applied.has(cell)) continue;
-            applied.add(cell);
-            newCells.push(cell);
-          }
-          if (previewToolEffects) {
-            setPathPreview(buildPreviewFromAppliedCells(applied));
-          }
+        const newCells: number[] = [];
+        for (const cell of traceWorldSegment(lastPoint, worldPoint)) {
+          if (applied.has(cell)) continue;
+          applied.add(cell);
+          newCells.push(cell);
         }
+        if (newCells.length) stampStrokeCells(newCells);
       }
     },
-    [buildPreviewFromAppliedCells, previewToolEffects, setPathPreview, traceWorldSegment],
+    [stampStrokeCells, traceWorldSegment],
   );
 
   const commitStrokeBuffer = useCallback(
     (value: PixelValue) => {
-      const applied = strokeAppliedCellsRef.current;
-      if (!applied || applied.size === 0) return;
-      const targetCells = new Set<number>();
-      for (const baseCell of applied) {
-        const indices = computeBrushIndices(baseCell);
-        for (const idx of indices) {
-          targetCells.add(idx);
-        }
+      const scratch = strokeMaskRef.current;
+      const bounds = scratch?.bounds;
+      if (!scratch || !bounds) return;
+      const grid = { width: gridWidth, height: gridHeight };
+      const packed = toPackedValue(value);
+      try {
+        editLayer(activeLayerId, bounds, (buffer) => fillMask(buffer, scratch.mask, bounds, packed));
+      } finally {
+        clearMaskRect(scratch.mask, grid, bounds);
+        scratch.bounds = null;
       }
-      if (!targetCells.size) return;
-      setActiveLayerPixels((prev) => {
-        const next = [...prev];
-        let changed = false;
-        targetCells.forEach((idx) => {
-          if (next[idx] !== value) {
-            next[idx] = value;
-            changed = true;
-          }
-        });
-        if (!changed) {
-          return prev;
-        }
-        markModified();
-        return next;
-      });
     },
-    [computeBrushIndices, markModified, setActiveLayerPixels],
+    [activeLayerId, editLayer, gridHeight, gridWidth],
   );
 
   const clearPointerQueue = useCallback(() => {
@@ -362,12 +379,19 @@ export function useStrokePipeline({
     lastPaintedIndexRef.current = null;
     strokeWorldPointsRef.current = null;
     strokeAppliedCellsRef.current = null;
+    if (strokeMaskRef.current) {
+      strokeMaskRef.current = clearScratchMask(strokeMaskRef.current, {
+        width: gridWidth,
+        height: gridHeight,
+      });
+    }
+    strokePreviewRef.current = null;
     activePointerIdRef.current = null;
     setDragStartIndex(null);
     setPathPreview(null);
     clearPointerQueue();
     finalizeAction();
-  }, [clearPointerQueue, finalizeAction, setDragStartIndex, setPathPreview]);
+  }, [clearPointerQueue, finalizeAction, gridHeight, gridWidth, setDragStartIndex, setPathPreview]);
 
   const flushPointerQueue = useCallback(function flushPointerQueueInternal() {
     pointerRAFRef.current = null;
@@ -458,6 +482,7 @@ export function useStrokePipeline({
     beginDragStroke,
     markLastPainted,
     resetDrawingState,
+    resetForGrid,
     beginStroke,
     appendStrokePoint,
     commitStrokeBuffer,

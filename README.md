@@ -20,6 +20,7 @@ Pixie Paint is a free, browser-based pixel art editor. Open it, pick a tool, dra
 - **Canvas navigation:** pan with two-finger scrolling or a middle-button drag, and zoom around the cursor with pinch, mouse wheel, or the Magnifier.
 - **Undo and redo** for every action, plus a one-shortcut Clear.
 - **PNG export** at a chosen scale, with empty and transparent cells kept transparent.
+- **Large canvases:** set the grid to any size from 1 to 2048 pixels per side. Drawing, filling, moving, undo, and export are built to stay responsive at 2048×2048 on desktop browsers.
 - **Settings that stick:** grid width and height, checkerboard size, the pixel grid overlay, tool previews, stroke preview dimming, and tool-shaped cursors are saved in local storage.
 - **Works on phones:** on small screens the Layers and Palette panels open as bottom sheets over the canvas without resizing the artwork.
 

@@ -5,14 +5,20 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useCallback,
   useState,
   type Dispatch,
   type ReactNode,
   type SetStateAction,
 } from "react";
 
+import {
+  DEFAULT_GRID_DIMENSION,
+  MAX_GRID_DIMENSION,
+  MIN_GRID_DIMENSION,
+} from "../PixelPencil.constants";
+
 type CanvasPixelSizeOption = 8 | 13 | 16 | 19 | 32;
-type GridDimensionOption = 16 | 32 | 64 | 128 | 256;
 type CheckerSizeOption = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
 interface PixelPencilSettingsContextValue {
@@ -24,10 +30,10 @@ interface PixelPencilSettingsContextValue {
   setUseToolAsMousePointer: Dispatch<SetStateAction<boolean>>;
   canvasPixelSize: CanvasPixelSizeOption;
   setCanvasPixelSize: Dispatch<SetStateAction<CanvasPixelSizeOption>>;
-  gridWidth: GridDimensionOption;
-  gridHeight: GridDimensionOption;
-  setGridWidth: Dispatch<SetStateAction<GridDimensionOption>>;
-  setGridHeight: Dispatch<SetStateAction<GridDimensionOption>>;
+  gridWidth: number;
+  gridHeight: number;
+  setGridWidth: (value: number) => void;
+  setGridHeight: (value: number) => void;
   showPixelGrid: boolean;
   setShowPixelGrid: Dispatch<SetStateAction<boolean>>;
   checkerSize: CheckerSizeOption;
@@ -35,6 +41,18 @@ interface PixelPencilSettingsContextValue {
 }
 
 const STORAGE_KEY = "pixel-pencil-settings";
+
+export function clampGridDimension(value: unknown): number | null {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < MIN_GRID_DIMENSION ||
+    value > MAX_GRID_DIMENSION
+  ) {
+    return null;
+  }
+  return value;
+}
 
 const PixelPencilSettingsContext =
   createContext<PixelPencilSettingsContextValue | null>(null);
@@ -49,8 +67,16 @@ export function PixelPencilSettingsProvider({
   const [useToolAsMousePointer, setUseToolAsMousePointer] = useState(false);
   const [canvasPixelSize, setCanvasPixelSize] =
     useState<CanvasPixelSizeOption>(8);
-  const [gridWidth, setGridWidth] = useState<GridDimensionOption>(32);
-  const [gridHeight, setGridHeight] = useState<GridDimensionOption>(32);
+  const [gridWidth, setGridWidthState] = useState(DEFAULT_GRID_DIMENSION);
+  const [gridHeight, setGridHeightState] = useState(DEFAULT_GRID_DIMENSION);
+  const setGridWidth = useCallback((value: number) => {
+    const next = clampGridDimension(value);
+    if (next !== null) setGridWidthState(next);
+  }, []);
+  const setGridHeight = useCallback((value: number) => {
+    const next = clampGridDimension(value);
+    if (next !== null) setGridHeightState(next);
+  }, []);
   const [showPixelGrid, setShowPixelGrid] = useState(false);
   const [checkerSize, setCheckerSize] = useState<CheckerSizeOption>(8);
 
@@ -66,8 +92,8 @@ export function PixelPencilSettingsProvider({
           dimStrokePreview: boolean;
           useToolAsMousePointer: boolean;
           canvasPixelSize: CanvasPixelSizeOption;
-          gridWidth: GridDimensionOption;
-          gridHeight: GridDimensionOption;
+          gridWidth: unknown;
+          gridHeight: unknown;
           showPixelGrid: boolean;
           checkerSize: CheckerSizeOption;
         }>;
@@ -88,22 +114,12 @@ export function PixelPencilSettingsProvider({
         ) {
           setCanvasPixelSize(parsed.canvasPixelSize);
         }
-        if (
-          parsed.gridWidth &&
-          (GRID_DIMENSION_OPTIONS as readonly number[]).includes(
-            parsed.gridWidth,
-          )
-        ) {
-          setGridWidth(parsed.gridWidth);
-        }
-        if (
-          parsed.gridHeight &&
-          (GRID_DIMENSION_OPTIONS as readonly number[]).includes(
-            parsed.gridHeight,
-          )
-        ) {
-          setGridHeight(parsed.gridHeight);
-        }
+        setGridWidthState(
+          clampGridDimension(parsed.gridWidth) ?? DEFAULT_GRID_DIMENSION,
+        );
+        setGridHeightState(
+          clampGridDimension(parsed.gridHeight) ?? DEFAULT_GRID_DIMENSION,
+        );
         if (typeof parsed.showPixelGrid === "boolean") {
           setShowPixelGrid(parsed.showPixelGrid);
         }
@@ -173,6 +189,8 @@ export function PixelPencilSettingsProvider({
       canvasPixelSize,
       gridWidth,
       gridHeight,
+      setGridWidth,
+      setGridHeight,
       showPixelGrid,
       checkerSize,
     ],
@@ -201,14 +219,6 @@ export const CANVAS_PIXEL_SIZE_OPTIONS: ReadonlyArray<CanvasPixelSizeOption> = [
   16,
   19,
   32,
-] as const;
-
-export const GRID_DIMENSION_OPTIONS: ReadonlyArray<GridDimensionOption> = [
-  16,
-  32,
-  64,
-  128,
-  256
 ] as const;
 
 export const CHECKER_SIZE_OPTIONS: ReadonlyArray<CheckerSizeOption> = [

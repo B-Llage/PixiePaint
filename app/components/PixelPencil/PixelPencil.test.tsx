@@ -1,6 +1,8 @@
-import { useEffect } from "react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { useEffect, useState } from "react";
 import type { Dispatch, MutableRefObject, PointerEvent as ReactPointerEvent, SetStateAction } from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PixelPencilSettingsProvider } from "./context/PixelPencilSettingsContext";
@@ -9,6 +11,9 @@ import packageJson from "../../../package.json";
 import { PixelPencil } from "./PixelPencil";
 import { MagnifierTool, TOOLS } from "./PixelPencilTools";
 import type { PixelValue } from "./PixelPencilTypes";
+import { collectFillMask, type PreviewMask } from "./grid-geometry";
+import type { OverlayFrame } from "./grid-renderer";
+import { unpackColor, type PixelBuffer } from "./pixel-buffer";
 
 interface GridHarnessProps {
   displayCellSize: number;
@@ -16,9 +21,9 @@ interface GridHarnessProps {
   toolCursorIcon: string;
   toolCursorHotspot: { x: number; y: number };
   useToolAsMousePointer: boolean;
-  pixels: PixelValue[];
-  brushPreview: Set<number> | null;
-  brushSizePreview: Set<number> | null;
+  composite: PixelBuffer;
+  getOverlayFrame: () => OverlayFrame;
+  redraw: { subscribe(listener: () => void): () => void };
   selectionOverlay: { rect: { x: number; y: number; width: number; height: number } } | null;
   gridRef: MutableRefObject<HTMLCanvasElement | null>;
   gridWrapperRef: MutableRefObject<HTMLDivElement | null>;
@@ -32,12 +37,50 @@ interface GridHarnessProps {
   handlePointerCancel: (event: ReactPointerEvent<HTMLCanvasElement>) => void;
 }
 
+/** The cell indices a preview mask marks, scanning only its bounds. */
+function maskCells(preview: PreviewMask | null, gridWidth: number): number[] {
+  if (!preview) return [];
+  const cells: number[] = [];
+  const { mask, bounds } = preview;
+  for (let y = bounds.y; y < bounds.y + bounds.height; y += 1) {
+    for (let x = bounds.x; x < bounds.x + bounds.width; x += 1) {
+      if (mask[y * gridWidth + x]) cells.push(y * gridWidth + x);
+    }
+  }
+  return cells;
+}
+
+const layersPanelRender = vi.hoisted(() => vi.fn());
+
+vi.mock("./grid-geometry", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./grid-geometry")>();
+  return { ...actual, collectFillMask: vi.fn(actual.collectFillMask) };
+});
+
+vi.mock("./LayersPanel", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./LayersPanel")>();
+  return {
+    ...actual,
+    LayersPanel: function CountedLayersPanel(props: Parameters<typeof actual.LayersPanel>[0]) {
+      layersPanelRender();
+      return <actual.LayersPanel {...props} />;
+    },
+  };
+});
+
 vi.mock("./PixelGrid", () => ({
   PixelGrid: function GridHarness(props: GridHarnessProps) {
     const { onViewportResize } = props;
     useEffect(() => {
       onViewportResize({ width: 300, height: 300 });
     }, [onViewportResize]);
+    // Overlay masks live in refs read at draw time, so tests sample them on demand.
+    const [overlay, setOverlay] = useState<{ brush: number[]; brushSizeShadow: number[]; bucketSize: number }>({ brush: [], brushSizeShadow: [], bucketSize: 0 });
+    const { subscribe } = props.redraw;
+    const [redrawCount, setRedrawCount] = useState(0);
+    useEffect(() => subscribe(() => setRedrawCount((count) => count + 1)), [subscribe]);
+    const compositeWidth = props.composite.width;
+    const compositeValues = Array.from(props.composite.data, (value) => unpackColor(value));
 
     function pointerAt(x: number, offsetX = 0, y = 0): ReactPointerEvent<HTMLCanvasElement> {
       const clientX = (x + 0.5) * props.displayCellSize + offsetX;
@@ -68,15 +111,33 @@ vi.mock("./PixelGrid", () => ({
     return (
       <div ref={(node) => { props.gridWrapperRef.current = node; }}>
         <canvas ref={(node) => { props.gridRef.current = node; }} />
-        <output data-testid="first-two-pixels">{JSON.stringify(props.pixels.slice(0, 2))}</output>
-        <output data-testid="painted-cells">{JSON.stringify(props.pixels.flatMap((value, index) => value === null ? [] : [index]))}</output>
-        <output data-testid="brush-preview">{JSON.stringify([...(props.brushPreview ?? [])])}</output>
-        <output data-testid="brush-size-preview">{JSON.stringify([...(props.brushSizePreview ?? [])])}</output>
+        <output data-testid="first-two-pixels">{JSON.stringify(compositeValues.slice(0, 2))}</output>
+        <output data-testid="painted-cells">{JSON.stringify(compositeValues.flatMap((value, index) => value === null ? [] : [index]))}</output>
+        <output data-testid="brush-preview">{JSON.stringify(overlay.brush)}</output>
+        <output data-testid="brush-size-preview">{JSON.stringify(overlay.brushSizeShadow)}</output>
+        <button onClick={() => {
+          const frame = props.getOverlayFrame();
+          setOverlay({
+            brush: maskCells(frame.brush, compositeWidth),
+            brushSizeShadow: maskCells(frame.brushSizeShadow, compositeWidth),
+            bucketSize: maskCells(frame.bucket, compositeWidth).length,
+          });
+        }}>Read overlay</button>
+        <output data-testid="redraw-count">{redrawCount}</output>
+        <button onClick={() => {
+          props.handlePointerMove(pointerAt(6, 0, 4));
+          props.handlePointerMove(pointerAt(4, 0, 4));
+        }}>Drag out and back</button>
+        <button onClick={() => {
+          props.handlePointerMove(pointerAt(8, 0, 4));
+          props.handlePointerMove(pointerAt(4, 0, 4));
+        }}>Drag further out and back</button>
+        <output data-testid="bucket-preview">{JSON.stringify(overlay.bucketSize)}</output>
         <output data-testid="selection-rect">{JSON.stringify(props.selectionOverlay?.rect ?? null)}</output>
         <output data-testid="canvas-scroll">{JSON.stringify(props.canvasScroll)}</output>
         <output data-testid="canvas-height">{props.gridHeight * props.displayCellSize}</output>
         <output data-testid="cell-size">{props.displayCellSize}</output>
-        <output data-testid="grid-width">{props.pixels.length / props.gridHeight}</output>
+        <output data-testid="grid-width">{props.composite.data.length / props.gridHeight}</output>
         <output data-testid="tool-cursor">{JSON.stringify({ icon: props.toolCursorIcon, hotspot: props.toolCursorHotspot, enabled: props.useToolAsMousePointer })}</output>
         <button onClick={() => props.onWheelZoom("in", 1, { x: 73.25, y: 91.5 })}>Zoom wheel in</button>
         <button onClick={() => props.onWheelZoom("out", 1, { x: 73.25, y: 91.5 })}>Zoom wheel out</button>
@@ -105,6 +166,9 @@ vi.mock("./PixelGrid", () => ({
         <button onClick={() => props.handlePointerDown(pointerAt(0), 0)}>Start move</button>
         <button onClick={() => props.handlePointerMove(pointerAt(1))}>Drag one cell</button>
         <button onClick={() => props.handlePointerMove(pointerAt(4, 0, 4))}>Hover center cell</button>
+        {[1, 2, 3].map((cell) => (
+          <button key={cell} onClick={() => props.handlePointerMove(pointerAt(cell, 0, cell))}>{`Hover cell ${cell}`}</button>
+        ))}
         <button onClick={() => props.handlePointerUp(pointerAt(1))}>Finish move</button>
         <button onClick={() => props.handlePointerCancel(pointerAt(1))}>Cancel move</button>
       </div>
@@ -137,10 +201,12 @@ function paintedCells(): number[] {
 }
 
 function brushPreview(): number[] {
+  fireEvent.click(screen.getByRole("button", { name: "Read overlay" }));
   return JSON.parse(screen.getByTestId("brush-preview").textContent ?? "[]") as number[];
 }
 
 function brushSizePreview(): number[] {
+  fireEvent.click(screen.getByRole("button", { name: "Read overlay" }));
   return JSON.parse(screen.getByTestId("brush-size-preview").textContent ?? "[]") as number[];
 }
 
@@ -189,6 +255,88 @@ describe("PixelPencil move tool", () => {
   });
 });
 
+describe("PixelPencil picker", () => {
+  it("picking a color highlights its palette swatch", async () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    const swatches = () => screen.getAllByRole("button", { name: /^Use color / });
+    const swatch = () => screen.getByRole("button", { name: "Use color #1f2937" });
+
+    fireEvent.click(swatch());
+    fireEvent.click(screen.getByRole("button", { name: "Paint origin" }));
+    await waitFor(() => expect(firstTwoPixels()[0]).toBe("#1f2937"));
+
+    // Switch away so only the picker can bring the swatch back.
+    fireEvent.click(screen.getByRole("button", { name: "Use color #000000" }));
+    expect(swatch().getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.click(screen.getByRole("button", { name: "Picker" }));
+    fireEvent.click(screen.getByRole("button", { name: "Paint origin" }));
+    await waitFor(() => expect(swatch().getAttribute("aria-pressed")).toBe("true"));
+    const pressed = swatches().filter((button) => button.getAttribute("aria-pressed") === "true");
+    expect(pressed).toEqual([swatch()]);
+    // Picking leaves the artwork unchanged.
+    expect(paintedCells()).toEqual([0]);
+  });
+});
+
+describe("PixelPencil history", () => {
+  it("undoes and redoes a bucket fill, a clear, and adding and deleting a layer", async () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    const click = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+    const center = 4 * 32 + 4;
+
+    click("Paint origin");
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+
+    // The bucket fills the empty region around the painted origin.
+    click("Bucket");
+    click("Paint center");
+    await waitFor(() => expect(paintedCells()).toHaveLength(32 * 32));
+    click("Undo");
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+    click("Redo");
+    await waitFor(() => expect(paintedCells()).toHaveLength(32 * 32));
+    click("Undo");
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+
+    click("Clear");
+    click("Yes, clear");
+    await waitFor(() => expect(paintedCells()).toEqual([]));
+    click("Undo");
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+
+    click("Add Layer");
+    click("Pencil");
+    click("Paint center");
+    await waitFor(() => expect(paintedCells()).toEqual([0, center]));
+    const layerTwoRow = () => screen.getByRole("button", { name: "Select Layer 2" }).closest("li") as HTMLElement;
+    fireEvent.click(within(layerTwoRow()).getByRole("button", { name: "Delete layer" }));
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+    expect(screen.queryByRole("button", { name: "Select Layer 2" })).toBeNull();
+
+    click("Undo");
+    await waitFor(() => expect(paintedCells()).toEqual([0, center]));
+    click("Undo");
+    await waitFor(() => expect(paintedCells()).toEqual([0]));
+    expect(screen.getByRole("button", { name: "Select Layer 2" })).not.toBeNull();
+    click("Undo");
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Select Layer 2" })).toBeNull());
+
+    // Redoing the added layer brings it back blank; redoing the stroke repaints it.
+    click("Redo");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Select Layer 2" })).not.toBeNull());
+    expect(paintedCells()).toEqual([0]);
+    click("Redo");
+    await waitFor(() => expect(paintedCells()).toEqual([0, center]));
+  });
+});
+
+function setGridSize(label: "Grid Width" | "Grid Height", value: number) {
+  const input = screen.getByLabelText(label);
+  fireEvent.change(input, { target: { value: String(value) } });
+  fireEvent.blur(input);
+}
+
 describe("PixelPencil grid resize", () => {
   const undoButton = () => screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement;
   const gridWidth = () => Number(screen.getByTestId("grid-width").textContent);
@@ -203,8 +351,7 @@ describe("PixelPencil grid resize", () => {
     expect(undoButton().disabled).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const [widthOption] = screen.getAllByRole("button", { name: "64px" });
-    fireEvent.click(widthOption);
+    setGridSize("Grid Width", 64);
 
     // The painted cell stays at (4, 4), re-indexed for the wider grid.
     expect(gridWidth()).toBe(64);
@@ -213,8 +360,7 @@ describe("PixelPencil grid resize", () => {
     expect(undoButton().disabled).toBe(true);
 
     // Shrinking keeps the top-left region, so (4, 4) survives a 16px width.
-    const [narrowOption] = screen.getAllByRole("button", { name: "16px" });
-    fireEvent.click(narrowOption);
+    setGridSize("Grid Width", 16);
     expect(gridWidth()).toBe(16);
     expect(paintedCells()).toEqual([4 * 16 + 4]);
     expect(undoButton().disabled).toBe(true);
@@ -224,6 +370,53 @@ describe("PixelPencil grid resize", () => {
     fireEvent.click(screen.getByRole("button", { name: "Paint origin" }));
     await waitFor(() => expect(paintedCells()).toEqual([0, 4 * 16 + 4]));
     expect(undoButton().disabled).toBe(false);
+  });
+});
+
+describe("PixelPencil grid resize during an open action", () => {
+  const undoButton = () => screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement;
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("a grid resize during an open stroke clears the action without writing stale cells", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Start center stroke" }));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    setGridSize("Grid Width", 8);
+    setGridSize("Grid Height", 8);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Finish center stroke" }));
+
+    expect(Number(screen.getByTestId("grid-width").textContent)).toBe(8);
+    // The stroke's cell (4, 4) was painted before the resize and survives it; the
+    // pointer-up at (6, 4) must not paint anything, and nothing may sit outside 8x8.
+    expect(paintedCells().filter((index) => index >= 64 || index === 4 * 8 + 6)).toEqual([]);
+    expect(undoButton().disabled).toBe(true);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("a grid resize during a move drag ends the drag and leaves history empty", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Paint origin" }));
+    await waitFor(() => expect(firstTwoPixels()[0]).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Move" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start move" }));
+    fireEvent.click(screen.getByRole("button", { name: "Drag one cell" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    setGridSize("Grid Width", 8);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Finish move" }));
+
+    expect(Number(screen.getByTestId("grid-width").textContent)).toBe(8);
+    expect(undoButton().disabled).toBe(true);
+    // The layer keeps the cell where the drag had moved it; no old-size copy is written back.
+    expect(paintedCells()).toEqual([1]);
+    expect(consoleError).not.toHaveBeenCalled();
   });
 });
 
@@ -458,6 +651,85 @@ describe("PixelPencil viewport", () => {
   });
 });
 
+describe("PixelPencil stroke preview redraws", () => {
+  it("requests a redraw each time a stroke grows its preview mask in place", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    const click = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+    const redraws = () => Number(screen.getByTestId("redraw-count").textContent);
+    // Delivers queued frames, including ones requested while delivering (pointer
+    // samples are traced in a frame that then requests the redraw).
+    const runFrames = () => {
+      act(() => {
+        for (let pass = 0; pass < 4 && frames.length; pass += 1) {
+          for (const frame of frames.splice(0, frames.length)) frame(0);
+        }
+      });
+    };
+
+    click("Start center stroke");
+    runFrames();
+    const afterPress = redraws();
+    expect(afterPress).toBeGreaterThan(0);
+
+    // Each drag extends the stroke but ends on the pressed cell, so the hover cell
+    // does not change and only the in-place mask growth can request the redraw.
+    click("Drag out and back");
+    runFrames();
+    const afterFirstGrowth = redraws();
+    expect(afterFirstGrowth).toBeGreaterThan(afterPress);
+
+    click("Drag further out and back");
+    runFrames();
+    expect(redraws()).toBeGreaterThan(afterFirstGrowth);
+  });
+});
+
+describe("PixelPencil bucket hover preview", () => {
+  const bucketPreviewSize = () => {
+    fireEvent.click(screen.getByRole("button", { name: "Read overlay" }));
+    return Number(screen.getByTestId("bucket-preview").textContent);
+  };
+  const click = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+
+  it("computes the fill region once per hovered region and again after an edit", () => {
+    vi.mocked(collectFillMask).mockClear();
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    click("Bucket");
+
+    click("Hover center cell");
+    expect(bucketPreviewSize()).toBe(32 * 32);
+    expect(bucketPreviewSize()).toBe(32 * 32);
+    expect(collectFillMask).toHaveBeenCalledTimes(1);
+
+    // Other cells inside the same filled region reuse the cached mask.
+    click("Hover cell 1");
+    click("Hover cell 2");
+    expect(bucketPreviewSize()).toBe(32 * 32);
+    expect(collectFillMask).toHaveBeenCalledTimes(1);
+
+    // An edit changes the layer, so the next hover recomputes.
+    click("Pencil");
+    click("Paint origin");
+    click("Bucket");
+    click("Hover center cell");
+    expect(bucketPreviewSize()).toBe(32 * 32 - 1);
+    expect(collectFillMask).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not compute the fill region for other tools", () => {
+    vi.mocked(collectFillMask).mockClear();
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    click("Hover center cell");
+    expect(bucketPreviewSize()).toBe(0);
+    expect(collectFillMask).not.toHaveBeenCalled();
+  });
+});
+
 describe("PixelPencil controls", () => {
   it("shows a centered ghost of the current brush only during size dragging", () => {
     vi.stubGlobal("PointerEvent", class extends MouseEvent {
@@ -607,6 +879,20 @@ describe("PixelPencil controls", () => {
     expect(paintedCells()).not.toContain(4 * 32 + 4);
   });
 
+  it("moving the pointer does not re-render the layers panel", () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    const rendersAfterMount = layersPanelRender.mock.calls.length;
+    expect(rendersAfterMount).toBeGreaterThan(0);
+
+    for (const cell of [1, 2, 3]) {
+      fireEvent.click(screen.getByRole("button", { name: `Hover cell ${cell}` }));
+    }
+    expect(layersPanelRender).toHaveBeenCalledTimes(rendersAfterMount);
+    // The hover still reaches the canvas overlay.
+    expect(brushPreview()).toEqual([3 * 32 + 3]);
+    expect(layersPanelRender).toHaveBeenCalledTimes(rendersAfterMount);
+  });
+
   it("shows the same single-cell hover preview for pencil, line, and shape", () => {
     render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
 
@@ -717,5 +1003,22 @@ describe("PixelPencil controls", () => {
     expect(within(changelog).getByText(versionLabel)).not.toBeNull();
     expect(within(changelog).getByText(/Move artwork or selections with the new Move tool/)).not.toBeNull();
     expect(within(changelog).getByText(/mobile sheets without changing the canvas size/)).not.toBeNull();
+  });
+});
+
+describe("PixelPencil layers sidebar", () => {
+  it("reserves a stable scrollbar gutter so adding or removing layers never narrows the panel", () => {
+    render(<PixelPencilSettingsProvider><PixelPencil /></PixelPencilSettingsProvider>);
+    const addLayer = screen.getAllByRole("button", { name: "Add Layer" })[0];
+    const scroller = addLayer.closest("[class*='overflow-y-']");
+    expect(scroller).not.toBeNull();
+    expect(scroller?.className).toContain("panel-scroll");
+    // overflow-y: scroll makes Safari paint a light disabled scrollbar once the
+    // list stops overflowing; auto plus a stable gutter keeps the width without it.
+    expect(scroller?.className).toContain("overflow-y-auto");
+    expect(scroller?.className).not.toContain("overflow-y-scroll");
+    const css = readFileSync(join(__dirname, "../../globals.css"), "utf8");
+    expect(css).toMatch(/\.panel-scroll \{\s*scrollbar-gutter: stable;\s*scrollbar-color: #52525b transparent;/);
+    expect(css).toMatch(/\.panel-scroll::-webkit-scrollbar-track \{\s*background: transparent;/);
   });
 });

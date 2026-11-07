@@ -9,6 +9,8 @@ interface ActionRequestModalProps {
   confirmText?: string;
   cancelText?: string;
   hideCancelButton?: boolean;
+  /** Shown under the action buttons as an alert. */
+  error?: string | null;
 }
 
 export function ActionRequestModal({
@@ -20,6 +22,7 @@ export function ActionRequestModal({
   confirmText = "Confirm",
   cancelText = "Cancel",
   hideCancelButton = false,
+  error = null,
 }: ActionRequestModalProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
@@ -58,6 +61,11 @@ export function ActionRequestModal({
             {confirmText}
           </button>
         </div>
+        {error ? (
+          <p role="alert" className="mt-3 text-right text-sm text-red-600 dark:text-red-400">
+            {error}
+          </p>
+        ) : null}
       </div>
     </div>
   );

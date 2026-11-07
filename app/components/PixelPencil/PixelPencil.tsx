@@ -25,21 +25,34 @@ import { PixelGrid } from "./PixelGrid";
 import { PixelPencilModals } from "./PixelPencilModals";
 import { LayersPanel } from "./LayersPanel";
 import {
-  arePixelsEqual,
-  cloneLayers,
-  cloneSelection,
-  composeLayers,
-  resizePixels,
-} from "./pixel-operations";
+  cloneBuffer,
+  createBuffer,
+  fillMask,
+  isBufferEmpty,
+  resizeBuffer,
+  toPackedValue,
+  unpackColor,
+  type DirtyRect,
+  type PixelBuffer,
+} from "./pixel-buffer";
 import {
-  collectFillRegion,
+  clearScratchMask,
+  collectFillMask,
   computeLineIndices as computeLineIndicesOnGrid,
   computeShapeCells as computeShapeCellsOnGrid,
+  scratchPreview,
+  stampScratch,
+  type PreviewMask,
+  type ScratchMask,
 } from "./grid-geometry";
+import type { OverlayFrame } from "./grid-renderer";
+import type { EditLayer } from "./layer-edit";
 import { checkerboardStyle } from "./checkerboard";
 import { useEscapeKey } from "./hooks/useEscapeKey";
 import { useStateWithRef } from "./hooks/useStateWithRef";
-import { useEditorHistory, type LayerSnapshot } from "./hooks/useEditorHistory";
+import { useEditorHistory, type EditorHistory, type EditorMeta } from "./hooks/useEditorHistory";
+import { useComposite } from "./hooks/useComposite";
+import { useRedrawSignal } from "./hooks/useRedrawSignal";
 import { useCanvasViewport } from "./hooks/useCanvasViewport";
 import { useSelectionGestures, useSelectionState } from "./hooks/useSelection";
 import { useMoveDrag } from "./hooks/useMoveDrag";
@@ -80,28 +93,32 @@ export function PixelPencil() {
     checkerSize,
   } = usePixelPencilSettings();
 
-  const totalCells = gridWidth * gridHeight;
-  const createEmptyPixelArray = () =>
-    new Array(totalCells).fill(null) as PixelValue[];
-  // The first layer's id and pixels are created once, on mount, and shared by
-  // the three pieces of state that start from them.
+  // The first layer's id is created once, on mount, and shared by the layer
+  // list and the active layer id.
   const [initialLayerId] = useState(() => createLayerId());
-  const [initialLayerPixels] = useState(() => createEmptyPixelArray());
+  // Layer buffers are mutated in place by `editLayer`; the array itself only
+  // changes for structural edits, undo/redo, and resizes.
   const [layers, setLayers, layersRef] = useStateWithRef<Layer[]>(() => [
     {
       id: initialLayerId,
       name: "Layer 1",
-      pixels: initialLayerPixels,
+      pixels: createBuffer(gridWidth, gridHeight),
       visible: true,
     },
   ]);
-  const [activeLayerId, setActiveLayerId] = useState<string>(initialLayerId);
-  const [activeLayerPixels, setActiveLayerPixelsState, activeLayerPixelsRef] =
-    useStateWithRef<PixelValue[]>(initialLayerPixels);
-  const [compositePixels, setCompositePixels, compositePixelsRef] = useStateWithRef<PixelValue[]>(
-    () => createEmptyPixelArray(),
-  );
-  const layerPreviews = useLayerPreviews(layers, gridWidth, gridHeight);
+  const [activeLayerId, setActiveLayerId, activeLayerIdRef] = useStateWithRef<string>(initialLayerId);
+  // Bumps on every pixel or layer change, for consumers keyed on layer contents.
+  const [layerVersion, setLayerVersion] = useState(0);
+  // Bumps when thumbnails should catch up: after an action ends or the layer list changes.
+  const [previewVersion, setPreviewVersion] = useState(0);
+  const redrawSignal = useRedrawSignal();
+  const { composite, compositeRef, compositeVersion, dirtyRef: compositeDirtyRef, recompose } = useComposite({
+    layersRef,
+    width: gridWidth,
+    height: gridHeight,
+    onComposed: redrawSignal.requestRedraw,
+  });
+  const layerPreviews = useLayerPreviews(layers, gridWidth, gridHeight, previewVersion);
   const [paletteThemeId, setPaletteThemeId] = useState<
     (typeof PALETTE_THEMES)[number]["id"]
   >(PALETTE_THEMES[0].id);
@@ -115,10 +132,19 @@ export function PixelPencil() {
   const [brushShape, setBrushShape] = useState<BrushShape>("square");
   const [shapeType, setShapeType] = useState<ShapeKind>("square");
   const [shapeFilled, setShapeFilled] = useState(false);
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const setHoverIndexIfChanged = useCallback((next: number | null) => {
-    setHoverIndex((prev) => (prev === next ? prev : next));
-  }, []);
+  // The hovered cell and the path preview change on every pointer move, so
+  // they live in refs and only request a canvas redraw instead of re-rendering
+  // the editor. The grid reads them through `getOverlayFrame`.
+  const { requestRedraw } = redrawSignal;
+  const hoverRef = useRef<number | null>(null);
+  const setHoverIndexIfChanged = useCallback(
+    (next: number | null) => {
+      if (hoverRef.current === next) return;
+      hoverRef.current = next;
+      requestRedraw();
+    },
+    [requestRedraw],
+  );
   const [lastPointedIndex, setLastPointedIndex] = useState<number | null>(null);
   const {
     isResetDialogOpen,
@@ -136,20 +162,33 @@ export function PixelPencil() {
     closeHotkeysDialog: handleCloseHotkeysDialog,
   } = useEditorDialogs();
   const [zoomMode, setZoomMode] = useState<ZoomMode>("in");
+  // The value a stroke paints; the path preview is drawn in it.
   const drawValueRef = useRef<PixelValue>(PALETTE_THEMES[0].colors[0]);
-  const [drawValueVersion, setDrawValueVersion] = useState(0);
-  const setDrawValue = useCallback((value: PixelValue) => {
-    if (drawValueRef.current === value) {
-      return;
-    }
-    drawValueRef.current = value;
-    setDrawValueVersion((prev) => prev + 1);
-  }, []);
+  const setDrawValue = useCallback(
+    (value: PixelValue) => {
+      if (drawValueRef.current === value) {
+        return;
+      }
+      drawValueRef.current = value;
+      requestRedraw();
+    },
+    [requestRedraw],
+  );
   const gridWrapperRef = useRef<HTMLDivElement | null>(null);
   const gridRef = useRef<HTMLCanvasElement | null>(null);
   const ignoredCanvasPointerIdRef = useRef<number | null>(null);
   const [dragStartIndex, setDragStartIndex] = useState<number | null>(null);
-  const [pathPreview, setPathPreview] = useState<Set<number> | null>(null);
+  const pathPreviewRef = useRef<PreviewMask | null>(null);
+  const setPathPreview = useCallback(
+    (next: PreviewMask | null) => {
+      // A stroke grows its mask in place, so any non-null preview needs a redraw even
+      // when its identity is unchanged; only hiding an already hidden preview is a no-op.
+      if (next === null && pathPreviewRef.current === null) return;
+      pathPreviewRef.current = next;
+      requestRedraw();
+    },
+    [requestRedraw],
+  );
   // The grid size the layers' pixel arrays are laid out for; see the resize
   // migration below.
   const [layerDimensions, setLayerDimensions] = useState({ width: gridWidth, height: gridHeight });
@@ -157,50 +196,39 @@ export function PixelPencil() {
   const [mobilePanel, setMobilePanel] = useState<"layers" | "palette" | null>(null);
   const mobileLayersButtonRef = useRef<HTMLButtonElement | null>(null);
   const mobilePaletteButtonRef = useRef<HTMLButtonElement | null>(null);
-  // Writes the active layer's pixels and mirrors them into `layers`. Like the
-  // hook setters, a functional `next` runs synchronously against the latest
-  // pixels, so callers may read flags set inside the updater.
-  const setActiveLayerPixels = useCallback(
-    (
-      next:
-        | PixelValue[]
-        | ((previous: PixelValue[]) => PixelValue[] | PixelValue[]),
-    ) => {
-      const previousPixels = activeLayerPixelsRef.current;
-      const resolvedPixels =
-        typeof next === "function"
-          ? (next as (prev: PixelValue[]) => PixelValue[])(previousPixels)
-          : next;
-      if (
-        previousPixels === resolvedPixels ||
-        (previousPixels &&
-          resolvedPixels &&
-          arePixelsEqual(previousPixels, resolvedPixels))
-      ) {
-        return;
-      }
-      setActiveLayerPixelsState(resolvedPixels);
+  // `editLayer` needs history, and history needs `restoreSelection` from the
+  // selection state that itself takes `editLayer`; the ref breaks the cycle.
+  // It is set in an effect, before any pointer or key handler can run.
+  const historyRef = useRef<EditorHistory | null>(null);
 
-      const currentLayers = layersRef.current;
-      const index = currentLayers.findIndex(
-        (layer) => layer.id === activeLayerId,
-      );
-      if (index === -1) {
-        return;
-      }
-      const targetLayer = currentLayers[index];
-      if (targetLayer.pixels === resolvedPixels) {
-        return;
-      }
-      const updatedLayers = [...currentLayers];
-      updatedLayers[index] = {
-        ...targetLayer,
-        pixels: resolvedPixels,
-      };
-      setLayers(updatedLayers);
+  const editLayer = useCallback<EditLayer>(
+    (layerId, rect, mutate) => {
+      const history = historyRef.current;
+      const layer = layersRef.current.find((item) => item.id === layerId);
+      if (!history || !layer) return null;
+      history.capturePixelsBefore(layerId, rect);
+      const changed = mutate(layer.pixels);
+      if (!changed) return null;
+      recompose(changed);
+      history.markModified();
+      setLayerVersion((version) => version + 1);
+      // `capturePixelsBefore` always leaves an action open, so thumbnails catch
+      // up when it ends (`finalizeAction`) or on a structure change, not here.
+      return changed;
     },
-    [activeLayerId, activeLayerPixelsRef, layersRef, setActiveLayerPixelsState, setLayers],
+    [layersRef, recompose],
   );
+
+  const getActiveLayer = useCallback(
+    () => layersRef.current.find((layer) => layer.id === activeLayerIdRef.current) ?? null,
+    [activeLayerIdRef, layersRef],
+  );
+
+  const getLayerBuffer = useCallback(
+    (layerId: string) => layersRef.current.find((layer) => layer.id === layerId)?.pixels ?? null,
+    [layersRef],
+  );
+
   const currentPalette = useMemo(() => {
     const found = PALETTE_THEMES.find((theme) => theme.id === paletteThemeId);
     return found ?? PALETTE_THEMES[0];
@@ -235,8 +263,9 @@ export function PixelPencil() {
     gridWidth,
     gridHeight,
     gridRef,
-    activeLayerPixelsRef,
-    setActiveLayerPixels,
+    getActiveLayer,
+    activeLayerId,
+    editLayer,
     setPathPreview,
   });
   const {
@@ -245,76 +274,112 @@ export function PixelPencil() {
     selectionRef,
     selectionPreviewRect,
     selectionContainsCell,
-    captureSelectionPixels,
     restoreSelection,
   } = selectionState;
 
-  const captureSnapshot = useCallback(
-    (): LayerSnapshot => ({
-      layers: cloneLayers(layersRef.current, totalCells),
-      activeLayerId,
-      selection: cloneSelection(selectionRef.current),
+  const captureMeta = useCallback(
+    (): EditorMeta => ({
+      layers: layersRef.current.map(({ id, name, visible }) => ({ id, name, visible })),
+      activeLayerId: activeLayerIdRef.current,
+      selection: selectionRef.current,
     }),
-    [activeLayerId, layersRef, selectionRef, totalCells],
+    [activeLayerIdRef, layersRef, selectionRef],
   );
 
-  const applySnapshot = useCallback(
-    (snapshot: LayerSnapshot) => {
-      const restoredLayers = cloneLayers(snapshot.layers, totalCells);
+  // Rebuilds the layer list in `meta`'s order. Layers keep their live buffers
+  // unless history handed back a replacement; a layer with neither (redo of an
+  // added layer) starts blank and later pixel entries fill it in.
+  const applyMeta = useCallback(
+    (meta: EditorMeta, buffers: Map<string, PixelBuffer>) => {
+      const currentLayers = layersRef.current;
+      const liveLayers = new Map(currentLayers.map((layer) => [layer.id, layer]));
+      const restoredLayers: Layer[] = meta.layers.map(({ id, name, visible }) => ({
+        id,
+        name,
+        visible,
+        pixels: buffers.get(id) ?? liveLayers.get(id)?.pixels ?? createBuffer(gridWidth, gridHeight),
+      }));
+      // Pixel entries restore their tiles through `onPixelsRestored`; only a
+      // different stack (order, visibility, or buffers) needs a full recompose.
+      const sameStack =
+        buffers.size === 0 &&
+        restoredLayers.length === currentLayers.length &&
+        restoredLayers.every(
+          (layer, index) =>
+            layer.id === currentLayers[index].id &&
+            layer.visible === currentLayers[index].visible &&
+            layer.pixels === currentLayers[index].pixels,
+        );
       setLayers(restoredLayers);
-      const nextActiveId = restoredLayers.some(
-        (layer) => layer.id === snapshot.activeLayerId,
-      )
-        ? snapshot.activeLayerId
-        : restoredLayers[restoredLayers.length - 1]?.id;
-      if (nextActiveId) {
-        setActiveLayerId(nextActiveId);
-      }
-      const targetLayer = restoredLayers.find(
-        (layer) => layer.id === (nextActiveId ?? snapshot.activeLayerId),
-      );
-      if (targetLayer) {
-        const cloned = targetLayer.pixels.slice();
-        setActiveLayerPixelsState(cloned);
-      }
-      restoreSelection(snapshot.selection);
+      setActiveLayerId(meta.activeLayerId);
+      restoreSelection(meta.selection);
+      if (!sameStack) recompose(null);
+      setLayerVersion((version) => version + 1);
+      setPreviewVersion((version) => version + 1);
       setHoverIndexIfChanged(null);
+      setPathPreview(null);
     },
     [
+      gridHeight,
+      gridWidth,
+      layersRef,
+      recompose,
       restoreSelection,
-      setActiveLayerPixelsState,
+      setActiveLayerId,
       setHoverIndexIfChanged,
       setLayers,
-      totalCells,
+      setPathPreview,
     ],
   );
 
+  const onPixelsRestored = useCallback(
+    (_layerId: string, rect: DirtyRect) => recompose(rect),
+    [recompose],
+  );
+
+  const history = useEditorHistory({ captureMeta, applyMeta, getLayerBuffer, onPixelsRestored });
+  useEffect(() => {
+    historyRef.current = history;
+  }, [history]);
   const {
     canUndo,
     canRedo,
-    recordSnapshot,
-    commitSnapshot,
     beginAction,
-    beginActionWithSnapshot,
-    finalizeAction,
-    markModified,
+    finalizeAction: finalizeHistoryAction,
+    isActionInProgress,
+    recordStructureChange: recordHistoryStructureChange,
     saveStacks,
     restoreStacks,
     clear: clearHistory,
     undo,
     redo,
-  } = useEditorHistory({ captureSnapshot, applySnapshot });
+  } = history;
+
+  // Ending an action that was open is when thumbnails catch up with its edits.
+  const finalizeAction = useCallback(() => {
+    const wasInProgress = isActionInProgress();
+    finalizeHistoryAction();
+    if (wasInProgress) setPreviewVersion((version) => version + 1);
+  }, [finalizeHistoryAction, isActionInProgress]);
+
+  // Layer-list changes can reorder, hide, add, or remove layers, so the
+  // composite is rebuilt in full and the thumbnails refreshed.
+  const recordStructureChange = useCallback(
+    (apply: () => Map<string, PixelBuffer> | void) => {
+      recordHistoryStructureChange(() => {
+        const replaced = apply();
+        recompose(null);
+        setLayerVersion((version) => version + 1);
+        setPreviewVersion((version) => version + 1);
+        return replaced;
+      });
+    },
+    [recompose, recordHistoryStructureChange],
+  );
 
   const paletteColors = useMemo(
     () => [...currentPalette.colors, "transparent"] as PaletteColor[],
     [currentPalette],
-  );
-  const indexToCoords = useCallback(
-    (index: number) => ({
-      x: index % gridWidth,
-      y: Math.floor(index / gridWidth),
-    }),
-    [gridWidth],
   );
 
   useEffect(() => {
@@ -339,15 +404,17 @@ export function PixelPencil() {
     close: handleCloseSaveDialog,
     confirmSave: handleConfirmSave,
     exportScale,
+    availableScales: exportScales,
     setExportScale: setExportScaleState,
     exportFilename,
     setExportFilename: setExportFilenameState,
     previewDataUrl,
+    saveError,
   } = usePixelExport({
     gridWidth,
     gridHeight,
-    pixels: compositePixels,
-    indexToCoords,
+    compositeRef,
+    compositeVersion,
   });
 
   const {
@@ -410,46 +477,25 @@ export function PixelPencil() {
   );
 
 
-  useEffect(() => {
-    const currentLayer = layers.find((layer) => layer.id === activeLayerId);
-    if (!currentLayer) return;
-    const currentPixels = activeLayerPixelsRef.current;
-    if (
-      currentPixels === currentLayer.pixels ||
-      !currentPixels ||
-      !arePixelsEqual(currentPixels, currentLayer.pixels)
-    ) {
-      const cloned = currentLayer.pixels.slice();
-      setActiveLayerPixelsState(cloned);
-    }
-  }, [activeLayerId, activeLayerPixelsRef, layers, setActiveLayerPixelsState]);
-
-  useEffect(() => {
-    const composed = composeLayers(layers, totalCells);
-    setCompositePixels(composed);
-  }, [layers, setCompositePixels, totalCells]);
-
   // Migrates the artwork when the grid size setting changes, adjusting state
   // during the render that first sees the new size so no frame renders the
   // layers against the wrong dimensions. Pixels keep their top-left anchored
   // position; cells outside the new grid are dropped and new cells are empty.
-  // The hover cell no longer maps to the same pixel afterwards, and history
-  // snapshots were taken at the old size, so both are cleared.
+  // The composite follows on its own: a new size gives it a new buffer that it
+  // composes in full. History tiles were taken at the old size, so history is
+  // cleared; the effect after the stroke and move hooks drops the hover cell,
+  // path preview, stroke and move drag (refs, which render must not write).
   if (layerDimensions.width !== gridWidth || layerDimensions.height !== gridHeight) {
-    const nextDimensions = { width: gridWidth, height: gridHeight };
-    setLayerDimensions(nextDimensions);
-    const nextLayers = setLayers((prevLayers) =>
+    setLayerDimensions({ width: gridWidth, height: gridHeight });
+    setLayers((prevLayers) =>
       prevLayers.map((layer) => ({
         ...layer,
-        pixels: resizePixels(layer.pixels, layerDimensions, nextDimensions),
+        pixels: resizeBuffer(layer.pixels, gridWidth, gridHeight),
       })),
     );
-    const activeLayer = nextLayers.find((layer) => layer.id === activeLayerId);
-    if (activeLayer) {
-      setActiveLayerPixelsState(activeLayer.pixels.slice());
-    }
+    setLayerVersion((version) => version + 1);
+    setPreviewVersion((version) => version + 1);
     clearHistory();
-    setHoverIndexIfChanged(null);
   }
 
   // Choosing a new grid size resets the persisted canvas pixel size to the
@@ -508,6 +554,7 @@ export function PixelPencil() {
     beginDragStroke,
     markLastPainted,
     resetDrawingState,
+    resetForGrid,
     beginStroke,
     appendStrokePoint,
     commitStrokeBuffer,
@@ -522,14 +569,13 @@ export function PixelPencil() {
     brushSize,
     brushShape,
     previewToolEffects,
-    activeLayerPixelsRef,
-    setActiveLayerPixels,
+    activeLayerId,
+    editLayer,
     setPathPreview,
     setDragStartIndex,
     setDrawValue,
     setHoverIndexIfChanged,
     resolvePointerFromClientPoint,
-    markModified,
     finalizeAction,
   });
 
@@ -543,7 +589,7 @@ export function PixelPencil() {
         resetDrawingState();
       }
     },
-    [resetDrawingState],
+    [resetDrawingState, setPathPreview],
   );
 
   useEffect(() => {
@@ -586,8 +632,7 @@ export function PixelPencil() {
   const updateShiftLinePreview = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>, targetIndex: number | null) => {
       const supportsShiftLine = tool === "pencil" || tool === "eraser";
-      const clearPreview = () =>
-        setPathPreview((prev) => (prev === null ? prev : null));
+      const clearPreview = () => setPathPreview(null);
 
       if (!supportsShiftLine) {
         clearPreview();
@@ -624,20 +669,19 @@ export function PixelPencil() {
       lastPointedIndex,
       previewToolEffects,
       setDrawValue,
+      setPathPreview,
       tool,
     ],
   );
 
   const pickColorAtIndex = useCallback(
     (pointerIndex: number) => {
-      const currentPixels = compositePixelsRef.current;
-      const value = currentPixels[pointerIndex];
-      const pickedColor: PaletteColor =
-        value === null ? "transparent" : (value as PaletteColor);
+      const value = unpackColor(compositeRef.current.data[pointerIndex]);
+      const pickedColor: PaletteColor = value === null ? "transparent" : value;
       setActiveColor(pickedColor);
       setDrawValue(pickedColor);
     },
-    [compositePixelsRef, setActiveColor, setDrawValue],
+    [compositeRef, setActiveColor, setDrawValue],
   );
 
   const computeShapeCells = useCallback(
@@ -654,44 +698,29 @@ export function PixelPencil() {
     reorderLayers: handleReorderLayers,
     selectLayer: handleSelectLayer,
   } = useLayerOperations({
-    totalCells,
+    gridWidth,
+    gridHeight,
     layersRef,
     setLayers,
     activeLayerId,
     setActiveLayerId,
     setPathPreview,
     setHoverIndexIfChanged,
-    recordSnapshot,
-    commitSnapshot,
+    recordStructureChange,
   });
 
   const floodFill = useCallback(
     (startIndex: number, fillValue: PixelValue) => {
-      let changed = false;
-      setActiveLayerPixels((prev) => {
-        const targetValue = prev[startIndex];
-        if (targetValue === fillValue) {
-          return prev;
-        }
-
-        const region = collectFillRegion(prev, startIndex, gridWidth, gridHeight);
-        if (region.size === 0) {
-          return prev;
-        }
-
-        const next = [...prev];
-        for (const index of region) {
-          next[index] = fillValue;
-        }
-        changed = true;
-        return next;
-      });
-
-      if (changed) {
-        markModified();
-      }
+      const layer = getActiveLayer();
+      if (!layer) return;
+      const packed = toPackedValue(fillValue);
+      if (layer.pixels.data[startIndex] === packed) return;
+      const region = collectFillMask(layer.pixels, startIndex);
+      if (!region) return;
+      const { mask, bounds } = region;
+      editLayer(layer.id, bounds, (buffer) => fillMask(buffer, mask, bounds, packed));
     },
-    [gridHeight, gridWidth, markModified, setActiveLayerPixels],
+    [editLayer, getActiveLayer],
   );
 
   useEffect(() => {
@@ -725,27 +754,39 @@ export function PixelPencil() {
     finalizeAction,
   });
 
-  const { hasActiveDrag, beginMoveDrag, updateMoveDrag, finishMoveDrag } = useMoveDrag({
+  const { hasActiveDrag, beginMoveDrag, updateMoveDrag, finishMoveDrag, cancelActiveDrag } = useMoveDrag({
     gridWidth,
     gridHeight,
-    totalCells,
     tool,
     autoPickLayer,
     gridRef,
     layersRef,
-    setLayers,
     activeLayerId,
     setActiveLayerId,
-    setActiveLayerPixelsState,
     selectionRef,
     setSelection,
-    captureSelectionPixels,
     resolvePointerFromClientPoint,
+    editLayer,
+    getLayerBuffer,
     saveStacks,
     restoreStacks,
-    beginActionWithSnapshot,
+    beginAction,
     finalizeAction,
   });
+
+  // A resize invalidates everything laid out for the old grid: an open move drag
+  // and stroke hold old-size copies and masks, and the hover cell and path
+  // preview index into the old grid. They live in refs, which render must not
+  // write, so they are dropped here, right after the render that resized the
+  // buffers and before any pointer event can reach them. History was already
+  // cleared in render, which also ended any open action.
+  useEffect(() => {
+    cancelActiveDrag();
+    resetForGrid();
+    hoverRef.current = null;
+    pathPreviewRef.current = null;
+    requestRedraw();
+  }, [cancelActiveDrag, layerDimensions, requestRedraw, resetForGrid]);
 
   const resolvePointerFromPointerEvent = useCallback(
     (event: ReactPointerEvent<Element>, options?: { clamp?: boolean }) =>
@@ -877,6 +918,7 @@ export function PixelPencil() {
       selectionRef,
       setDrawValue,
       setHoverIndexIfChanged,
+      setPathPreview,
       shapeFilled,
       shapeType,
       tool,
@@ -921,6 +963,7 @@ export function PixelPencil() {
       isDrawingRef,
       previewToolEffects,
       setHoverIndexIfChanged,
+      setPathPreview,
       shapeFilled,
       shapeType,
       tool,
@@ -1014,6 +1057,7 @@ export function PixelPencil() {
       processDrawingSamples,
       resolvePointerFromClientPoint,
       setHoverIndexIfChanged,
+      setPathPreview,
       shapeFilled,
       shapeType,
       tool,
@@ -1061,22 +1105,17 @@ export function PixelPencil() {
         commitStrokeBuffer(drawValueRef.current);
       }
       const pointerUpIndex = resolveIndexFromPointerEvent(event, { clamp: true });
-      setLastPointedIndex(pointerUpIndex ?? hoverIndex ?? lastPointedIndex);
+      setLastPointedIndex(pointerUpIndex ?? hoverRef.current ?? lastPointedIndex);
 
       if (wasDragAction) {
         const eventIndex = resolveIndexFromPointerEvent(event, { clamp: true });
-        const endIndex = eventIndex ?? hoverIndex ?? dragStartIndex;
+        const endIndex = eventIndex ?? hoverRef.current ?? dragStartIndex;
         if (dragStartIndex !== null && endIndex !== null) {
           const path =
             tool === "line"
               ? computeLineIndices(dragStartIndex, endIndex)
               : computeShapeCells(dragStartIndex, endIndex, shapeType, shapeFilled);
-          const before = activeLayerPixelsRef.current.slice();
           applyLinePath(path, drawValueRef.current);
-          const after = activeLayerPixelsRef.current;
-          if (!arePixelsEqual(before, after)) {
-            markModified();
-          }
         }
         setDragStartIndex(null);
         setPathPreview(null);
@@ -1093,7 +1132,6 @@ export function PixelPencil() {
       finalize();
     },
     [
-      activeLayerPixelsRef,
       activePointerIdRef,
       appendStrokePoint,
       applyLinePath,
@@ -1105,12 +1143,11 @@ export function PixelPencil() {
       finishMoveDrag,
       flushPointerQueue,
       hasActiveDrag,
-      hoverIndex,
       lastPointedIndex,
-      markModified,
       resolveIndexFromPointerEvent,
       resolvePointerFromPointerEvent,
       setHoverIndexIfChanged,
+      setPathPreview,
       shapeFilled,
       shapeType,
       stopStroke,
@@ -1148,71 +1185,126 @@ export function PixelPencil() {
         setPathPreview(null);
       }
     }
-  }, [isDrawingRef, setHoverIndexIfChanged, tool]);
+  }, [isDrawingRef, setHoverIndexIfChanged, setPathPreview, tool]);
 
-  const bucketPreview = useMemo(() => {
-    if (!previewToolEffects || hoverIndex === null || tool !== "bucket") return null;
-    const targetColor = activeLayerPixels[hoverIndex];
-    if (targetColor === undefined) return null;
+  // Scratch masks for the hover and brush-size previews, reused frame to frame
+  // and cleared over their last footprint, plus the last bucket fill region.
+  const brushPreviewMaskRef = useRef<ScratchMask | null>(null);
+  const brushSizeShadowMaskRef = useRef<ScratchMask | null>(null);
+  const bucketPreviewCacheRef = useRef<{
+    hoverIndex: number;
+    layerVersion: number;
+    buffer: PixelBuffer;
+    mask: PreviewMask | null;
+  } | null>(null);
 
-    return collectFillRegion(activeLayerPixels, hoverIndex, gridWidth, gridHeight);
-  }, [activeLayerPixels, gridHeight, gridWidth, hoverIndex, previewToolEffects, tool]);
+  // Builds the overlay for one frame from the hover and preview refs. The grid
+  // calls it on every draw, including redraws that do not re-render the
+  // editor, so it reads refs here (never during render).
+  const getOverlayFrame = useCallback((): OverlayFrame => {
+    const grid = { width: gridWidth, height: gridHeight };
+    const cellCount = gridWidth * gridHeight;
+    const rawHover = hoverRef.current;
+    const hover = rawHover !== null && rawHover >= 0 && rawHover < cellCount ? rawHover : null;
+    const drawsBrushPreview =
+      tool === "pencil" || tool === "eraser" || tool === "line" || tool === "shape";
 
-  const brushPreview = useMemo(() => {
-    if (
-      brushSizeDragging ||
-      !previewToolEffects ||
-      hoverIndex === null ||
-      (tool !== "pencil" && tool !== "eraser" && tool !== "line" && tool !== "shape")
-    ) {
-      return null;
+    let brush: PreviewMask | null = null;
+    if (!brushSizeDragging && previewToolEffects && hover !== null && drawsBrushPreview) {
+      const scratch = clearScratchMask(brushPreviewMaskRef.current, grid);
+      brushPreviewMaskRef.current = scratch;
+      stampScratch(scratch, grid, computeBrushIndices(hover));
+      brush = scratchPreview(scratch);
     }
-    return new Set(computeBrushIndices(hoverIndex));
-  }, [brushSizeDragging, computeBrushIndices, hoverIndex, previewToolEffects, tool]);
 
-  const brushSizePreview = useMemo(() => {
-    if (!brushSizeDragging || canvasViewport.width <= 0 || canvasViewport.height <= 0) return null;
-    const artworkLeft = renderOffsetX - scrollOriginX;
-    const artworkTop = renderOffsetY - scrollOriginY;
-    const visibleLeft = Math.max(0, artworkLeft);
-    const visibleRight = Math.min(canvasViewport.width, artworkLeft + contentWidth);
-    const visibleTop = Math.max(0, artworkTop);
-    const visibleBottom = Math.min(canvasViewport.height, artworkTop + contentHeight);
-    if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) return null;
-
-    const centerX = Math.min(gridWidth - 1, Math.max(0,
-      Math.floor(((visibleLeft + visibleRight) / 2 - artworkLeft) / displayCellSize),
-    ));
-    const centerY = Math.min(gridHeight - 1, Math.max(0,
-      Math.floor(((visibleTop + visibleBottom) / 2 - artworkTop) / displayCellSize),
-    ));
-    return new Set(computeBrushIndices(centerY * gridWidth + centerX));
-  }, [brushSizeDragging, canvasViewport.height, canvasViewport.width, computeBrushIndices, contentHeight, contentWidth, displayCellSize, gridHeight, gridWidth, renderOffsetX, renderOffsetY, scrollOriginX, scrollOriginY]);
-
-  const reset = useCallback(() => {
-    const isAlreadyEmpty = compositePixelsRef.current.every(
-      (value) => value === null,
-    );
-    if (isAlreadyEmpty) return;
-    commitSnapshot();
-    setLayers((prevLayers) => {
-      const clearedLayers = prevLayers.map((layer) => ({
-        ...layer,
-        pixels: new Array(totalCells).fill(null) as PixelValue[],
-      }));
-      const activeLayer = clearedLayers.find(
-        (layer) => layer.id === activeLayerId,
-      );
-      if (activeLayer) {
-        const cloned = activeLayer.pixels.slice();
-        setActiveLayerPixelsState(cloned);
+    // The fill region is skipped while drawing and cached per hovered cell and
+    // layer contents (the active buffer is mutated in place; `layerVersion`
+    // bumps on every edit).
+    let bucket: PreviewMask | null = null;
+    if (previewToolEffects && tool === "bucket" && hover !== null && !isDrawingRef.current) {
+      const layer = getActiveLayer();
+      if (layer && layer.pixels.data.length === cellCount) {
+        const cached = bucketPreviewCacheRef.current;
+        const sameLayer = cached && cached.layerVersion === layerVersion && cached.buffer === layer.pixels;
+        if (cached && sameLayer && (cached.hoverIndex === hover || cached.mask?.mask[hover] === 1)) {
+          // Same cell, or another cell inside the cached region (same fill region).
+          bucket = cached.mask;
+        } else {
+          bucket = collectFillMask(layer.pixels, hover);
+          bucketPreviewCacheRef.current = { hoverIndex: hover, layerVersion, buffer: layer.pixels, mask: bucket };
+        }
       }
-      return clearedLayers;
+    }
+
+    // While the brush size field is dragged, a shadow of the brush sits at the
+    // center of the visible artwork.
+    let brushSizeShadow: PreviewMask | null = null;
+    if (brushSizeDragging && canvasViewport.width > 0 && canvasViewport.height > 0) {
+      const artworkLeft = renderOffsetX - scrollOriginX;
+      const artworkTop = renderOffsetY - scrollOriginY;
+      const visibleLeft = Math.max(0, artworkLeft);
+      const visibleRight = Math.min(canvasViewport.width, artworkLeft + contentWidth);
+      const visibleTop = Math.max(0, artworkTop);
+      const visibleBottom = Math.min(canvasViewport.height, artworkTop + contentHeight);
+      if (visibleRight > visibleLeft && visibleBottom > visibleTop) {
+        const centerX = Math.min(gridWidth - 1, Math.max(0,
+          Math.floor(((visibleLeft + visibleRight) / 2 - artworkLeft) / displayCellSize),
+        ));
+        const centerY = Math.min(gridHeight - 1, Math.max(0,
+          Math.floor(((visibleTop + visibleBottom) / 2 - artworkTop) / displayCellSize),
+        ));
+        const scratch = clearScratchMask(brushSizeShadowMaskRef.current, grid);
+        brushSizeShadowMaskRef.current = scratch;
+        stampScratch(scratch, grid, computeBrushIndices(centerY * gridWidth + centerX));
+        brushSizeShadow = scratchPreview(scratch);
+      }
+    }
+
+    return {
+      path: previewToolEffects ? pathPreviewRef.current : null,
+      brush,
+      bucket,
+      brushSizeShadow,
+      pathColor: drawValueRef.current,
+      hoverColor: tool === "eraser" ? null : activeColor,
+      dim: dimStrokePreview,
+    };
+  }, [
+    activeColor,
+    brushSizeDragging,
+    canvasViewport.height,
+    canvasViewport.width,
+    computeBrushIndices,
+    contentHeight,
+    contentWidth,
+    dimStrokePreview,
+    displayCellSize,
+    getActiveLayer,
+    gridHeight,
+    gridWidth,
+    isDrawingRef,
+    layerVersion,
+    previewToolEffects,
+    renderOffsetX,
+    renderOffsetY,
+    scrollOriginX,
+    scrollOriginY,
+    tool,
+  ]);
+
+  // Clears every layer in place; history keeps a copy of each buffer for undo.
+  const reset = useCallback(() => {
+    if (isBufferEmpty(compositeRef.current)) return;
+    recordStructureChange(() => {
+      const replaced = new Map<string, PixelBuffer>();
+      for (const layer of layersRef.current) {
+        replaced.set(layer.id, cloneBuffer(layer.pixels));
+        layer.pixels.data.fill(0);
+      }
+      return replaced;
     });
     setHoverIndexIfChanged(null);
-  }, [activeLayerId, commitSnapshot, compositePixelsRef, setActiveLayerPixelsState, setHoverIndexIfChanged, setLayers, totalCells]);
-
-
+  }, [compositeRef, layersRef, recordStructureChange, setHoverIndexIfChanged]);
 
   const handleConfirmReset = useCallback(() => {
     handleCloseResetDialog();
@@ -1292,7 +1384,7 @@ export function PixelPencil() {
         </section>
         <div className="flex flex-1 min-h-0 lg:max-h-full">
           <aside className="hidden md:flex md:w-64 lg:w-72 flex-col border-r border-zinc-900 bg-zinc-950">
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <div className="min-h-0 flex-1 panel-scroll overflow-y-auto p-4">
               <LayersPanel
                 layers={layers}
                 activeLayerId={activeLayerId}
@@ -1349,18 +1441,13 @@ export function PixelPencil() {
                   displayCellSize={displayCellSize}
                   gridWrapperRef={gridWrapperRef}
                   gridRef={gridRef}
-                  pixels={compositePixels}
+                  composite={composite}
+                  compositeVersion={compositeVersion}
+                  compositeDirtyRef={compositeDirtyRef}
+                  getOverlayFrame={getOverlayFrame}
+                  redraw={redrawSignal}
                   showPixelGrid={showPixelGrid}
                   checkerSize={checkerSize}
-                  previewToolEffects={previewToolEffects}
-                  dimStrokePreview={dimStrokePreview}
-                  bucketPreview={bucketPreview}
-                  brushPreview={brushPreview}
-                  brushSizePreview={brushSizePreview}
-                  pathPreview={pathPreview}
-                  activeColor={activeColor}
-                  drawValueRef={drawValueRef}
-                  drawValueVersion={drawValueVersion}
                   tool={tool}
                   toolCursorIcon={currentTool.cursorIcon}
                   toolCursorHotspot={currentTool.cursorHotspot}
@@ -1402,7 +1489,7 @@ export function PixelPencil() {
                       Close
                     </button>
                   </div>
-                  <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">
+                  <div className="min-h-0 flex-1 panel-scroll overflow-y-auto overscroll-contain p-4">
                     {mobilePanel === "layers" ? (
                       <LayersPanel
                         layers={layers}
@@ -1484,10 +1571,12 @@ export function PixelPencil() {
         handleCloseSaveDialog={handleCloseSaveDialog}
         handleConfirmSave={handleConfirmSave}
         exportScale={exportScale}
+        exportScales={exportScales}
         setExportScale={setExportScaleState}
         exportFilename={exportFilename}
         setExportFilename={setExportFilenameState}
         previewDataUrl={previewDataUrl}
+        saveError={saveError}
         gridWidth={gridWidth}
         gridHeight={gridHeight}
         isSettingsDialogOpen={isSettingsDialogOpen}

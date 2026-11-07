@@ -8,15 +8,24 @@ import {
   useRef,
   useState,
 } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent, RefObject } from "react";
 
-import {
-  TRANSPARENT_DARK,
-  TRANSPARENT_LIGHT,
-} from "./PixelPencil.constants";
-import { PaletteColor, PixelValue, SelectionRect, SelectionState } from "./PixelPencilTypes";
+import { SelectionRect, SelectionState } from "./PixelPencilTypes";
 import { clampPan, getPanBounds, includePanOffset } from "./canvas-pan";
-import { checkerboardStyle } from "./checkerboard";
+import {
+  createCompositeSurface,
+  DESK_BACKGROUND,
+  drawCheckerboard,
+  drawComposite,
+  drawFloatingSelection,
+  drawGridLines,
+  drawOverlay,
+  visibleCellRect,
+  type CompositeSurface,
+  type OverlayFrame,
+  type ViewTransform,
+} from "./grid-renderer";
+import { unionRect, type DirtyRect, type PixelBuffer } from "./pixel-buffer";
 
 interface PixelGridProps {
   gridWidth: number;
@@ -24,18 +33,18 @@ interface PixelGridProps {
   displayCellSize: number;
   gridWrapperRef: MutableRefObject<HTMLDivElement | null>;
   gridRef: MutableRefObject<HTMLCanvasElement | null>;
-  pixels: PixelValue[];
+  /** The flattened artwork, mutated in place; a resize gives a new buffer. */
+  composite: PixelBuffer;
+  /** Bumps whenever `composite` changes in place. */
+  compositeVersion: number;
+  /** Cells changed since the last upload; the grid uploads them and sets it to `null`. */
+  compositeDirtyRef: RefObject<DirtyRect | null>;
+  /** The transient previews to draw this frame, read from refs at draw time. */
+  getOverlayFrame: () => OverlayFrame;
+  /** Redraws on each notification (hover and preview changes that do not re-render). */
+  redraw: { subscribe(listener: () => void): () => void };
   showPixelGrid: boolean;
   checkerSize: number;
-  previewToolEffects: boolean;
-  dimStrokePreview: boolean;
-  bucketPreview: Set<number> | null;
-  brushPreview: Set<number> | null;
-  brushSizePreview: Set<number> | null;
-  pathPreview: Set<number> | null;
-  activeColor: PaletteColor;
-  drawValueRef: MutableRefObject<PixelValue>;
-  drawValueVersion: number;
   tool: string;
   toolCursorIcon: string;
   toolCursorHotspot: { x: number; y: number };
@@ -72,10 +81,10 @@ const HORIZONTAL_TRACK_MARGIN = 37;
 const VERTICAL_HANDLE_PADDING = 0;
 const HORIZONTAL_HANDLE_PADDING = 0;
 const SELECTION_BORDER_THICKNESS = 0.1;
-const DESK_BACKGROUND = "#18181b";
+/** Outline elements extend this far past the viewport so a clipped edge stays hidden. */
+const SELECTION_CLIP_MARGIN = SELECTION_BORDER_THICKNESS + 4;
 const ZOOM_WHEEL_THRESHOLD = 60;
 const ZOOM_GESTURE_THRESHOLD = 0.15;
-const DIM_PREVIEW_OPACITY = 0.7;
 // WheelEvent.deltaMode values.
 const DOM_DELTA_LINE = 1;
 const DOM_DELTA_PAGE = 2;
@@ -113,17 +122,13 @@ export function PixelGrid({
   displayCellSize,
   gridWrapperRef,
   gridRef,
-  pixels,
+  composite,
+  compositeVersion,
+  compositeDirtyRef,
+  getOverlayFrame,
+  redraw,
   showPixelGrid,
   checkerSize,
-  previewToolEffects,
-  dimStrokePreview,
-  bucketPreview,
-  brushPreview,
-  brushSizePreview,
-  pathPreview,
-  activeColor,
-  drawValueRef,
   tool,
   toolCursorIcon,
   toolCursorHotspot,
@@ -143,7 +148,6 @@ export function PixelGrid({
   handlePointerCancel,
   handlePointerLeave,
   onBackgroundPointerDown,
-  drawValueVersion,
 }: PixelGridProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hoverIndexRef = useRef<number | null>(null);
@@ -198,15 +202,33 @@ export function PixelGrid({
       const width = Math.max(1, rect.width * displayCellSize);
       const height = Math.max(1, rect.height * displayCellSize);
       const halfBorder = SELECTION_BORDER_THICKNESS / 2;
+      const boxLeft = left - halfBorder;
+      const boxTop = top - halfBorder;
+      const boxRight = boxLeft + width + SELECTION_BORDER_THICKNESS;
+      const boxBottom = boxTop + height + SELECTION_BORDER_THICKNESS;
+      // Clip to the viewport so a huge selection never becomes a huge animated layer.
+      const clippedLeft = Math.max(boxLeft, -SELECTION_CLIP_MARGIN);
+      const clippedTop = Math.max(boxTop, -SELECTION_CLIP_MARGIN);
+      const clippedRight = Math.min(boxRight, viewport.width + SELECTION_CLIP_MARGIN);
+      const clippedBottom = Math.min(boxBottom, viewport.height + SELECTION_CLIP_MARGIN);
+      if (clippedRight <= clippedLeft || clippedBottom <= clippedTop) return null;
       return {
-        left: left - halfBorder,
-        top: top - halfBorder,
-        width: width + SELECTION_BORDER_THICKNESS,
-        height: height + SELECTION_BORDER_THICKNESS,
-      };
+        left: clippedLeft,
+        top: clippedTop,
+        width: clippedRight - clippedLeft,
+        height: clippedBottom - clippedTop,
+        // Keeps the dash phase anchored to the real top-left corner (see globals.css).
+        "--dash-x": `${boxLeft - clippedLeft}px`,
+        "--dash-y": `${boxTop - clippedTop}px`,
+      } as CSSProperties;
     },
-    [displayCellSize, renderOffsetX, renderOffsetY, scrollOriginX, scrollOriginY],
+    [displayCellSize, renderOffsetX, renderOffsetY, scrollOriginX, scrollOriginY, viewport.height, viewport.width],
   );
+
+  const previewStyle = selectionPreviewRect ? getSelectionStyle(selectionPreviewRect) : null;
+  const overlayStyle = selectionOverlay
+    ? getSelectionStyle(selectionOverlay.rect, selectionOverlay.offset)
+    : null;
 
   const lockBodyScroll = useCallback(() => {
     if (typeof document === "undefined") return;
@@ -248,194 +270,121 @@ export function PixelGrid({
     return () => resizeObserver.disconnect();
   }, [gridWrapperRef, onViewportResize]);
 
+  // The composite surface mirrors `composite` on an offscreen canvas; it is
+  // rebuilt for a new buffer and otherwise only re-uploads dirty cells.
+  const surfaceRef = useRef<CompositeSurface | null>(null);
+  const drawnCompositeVersionRef = useRef<number | null>(null);
+  /** True when a dirty rect was consumed since the last version bump was drawn. */
+  const dirtyConsumedRef = useRef(false);
+  const drawRef = useRef<() => void>(() => {});
+
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    if (
-      gridWidth <= 0 ||
-      gridHeight <= 0 ||
-      displayCellSize <= 0 ||
-      viewport.width <= 0 ||
-      viewport.height <= 0
-    ) {
+    const draw = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
       const context = canvas.getContext("2d");
-      context?.clearRect(0, 0, canvas.width, canvas.height);
-      return;
-    }
-    const context = canvas.getContext("2d");
-    if (!context) return;
+      if (
+        gridWidth <= 0 ||
+        gridHeight <= 0 ||
+        displayCellSize <= 0 ||
+        viewport.width <= 0 ||
+        viewport.height <= 0
+      ) {
+        context?.clearRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+      if (!context) return;
 
-    const devicePixelRatio =
-      typeof window === "undefined" ? 1 : window.devicePixelRatio ?? 1;
+      const devicePixelRatio =
+        typeof window === "undefined" ? 1 : window.devicePixelRatio ?? 1;
+      const viewportWidth = Math.max(1, viewport.width);
+      const viewportHeight = Math.max(1, viewport.height);
+      const deviceWidth = Math.max(1, Math.round(viewportWidth * devicePixelRatio));
+      const deviceHeight = Math.max(1, Math.round(viewportHeight * devicePixelRatio));
+      // Resizing a canvas clears it, so only do so when the size changed.
+      if (canvas.width !== deviceWidth) canvas.width = deviceWidth;
+      if (canvas.height !== deviceHeight) canvas.height = deviceHeight;
+      canvas.style.width = `${viewportWidth}px`;
+      canvas.style.height = `${viewportHeight}px`;
 
-    const viewportWidth = Math.max(1, viewport.width);
-    const viewportHeight = Math.max(1, viewport.height);
-    canvas.width = Math.max(1, Math.round(viewportWidth * devicePixelRatio));
-    canvas.height = Math.max(1, Math.round(viewportHeight * devicePixelRatio));
-    canvas.style.width = `${viewportWidth}px`;
-    canvas.style.height = `${viewportHeight}px`;
+      const view: ViewTransform = {
+        displayCellSize,
+        originX: renderOffsetX - scrollOriginX,
+        originY: renderOffsetY - scrollOriginY,
+        scaleX: canvas.width / viewportWidth,
+        scaleY: canvas.height / viewportHeight,
+      };
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.globalAlpha = 1;
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = DESK_BACKGROUND;
+      context.fillRect(0, 0, canvas.width, canvas.height);
 
-    const scaleX = canvas.width / viewportWidth;
-    const scaleY = canvas.height / viewportHeight;
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.fillStyle = DESK_BACKGROUND;
-    context.fillRect(0, 0, canvas.width, canvas.height);
+      const grid = { width: gridWidth, height: gridHeight };
+      const visible = visibleCellRect(grid, view, viewportWidth, viewportHeight);
+      if (visible) drawCheckerboard(context, grid, view, visible, checkerSize);
 
-    const previewColor = drawValueRef.current;
-    const hoverColor = tool === "eraser" ? null : activeColor;
-    const startX = Math.max(0, Math.floor((scrollOriginX - renderOffsetX) / displayCellSize));
-    const endX = Math.min(
-      gridWidth,
-      Math.ceil((scrollOriginX - renderOffsetX + viewportWidth) / displayCellSize) + 1,
-    );
-    const startY = Math.max(0, Math.floor((scrollOriginY - renderOffsetY) / displayCellSize));
-    const endY = Math.min(
-      gridHeight,
-      Math.ceil((scrollOriginY - renderOffsetY + viewportHeight) / displayCellSize) + 1,
-    );
+      // During a resize the composite can briefly have the old size; skip the
+      // blit for that frame rather than reading out of range.
+      if (composite.width === gridWidth && composite.height === gridHeight) {
+        const whole = { x: 0, y: 0, width: composite.width, height: composite.height };
+        let surface = surfaceRef.current;
+        if (!surface || surface.imageData.data.buffer !== composite.data.buffer) {
+          surface = createCompositeSurface(composite);
+          surface.dirty = whole;
+          surfaceRef.current = surface;
+          dirtyConsumedRef.current = false;
+        } else if (compositeDirtyRef.current) {
+          surface.dirty = unionRect(surface.dirty, compositeDirtyRef.current);
+          dirtyConsumedRef.current = true;
+        } else if (drawnCompositeVersionRef.current !== compositeVersion && !dirtyConsumedRef.current) {
+          // The version advanced with no dirty rect to explain it.
+          surface.dirty = whole;
+        }
+        compositeDirtyRef.current = null;
+        if (drawnCompositeVersionRef.current !== compositeVersion) {
+          // A redraw-signal frame can consume a recompose's dirty rect before React
+          // commits its version; that rect already covers the bump, so it is settled here.
+          drawnCompositeVersionRef.current = compositeVersion;
+          dirtyConsumedRef.current = false;
+        }
+        if (visible) drawComposite(context, surface, view, visible);
+      }
 
-    const normalizedCheckerSize = Math.max(1, Math.floor(checkerSize));
-    // Adjacent cells must share a device-pixel edge. Fractional CSS coordinates
-    // let canvas antialias each fill independently and expose hairline seams.
-    const xEdges = Array.from({ length: Math.max(0, endX - startX + 1) }, (_, index) =>
-      Math.round(
-        ((startX + index) * displayCellSize - scrollOriginX + renderOffsetX) *
-          scaleX,
-      ),
-    );
-    const yEdges = Array.from({ length: Math.max(0, endY - startY + 1) }, (_, index) =>
-      Math.round(
-        ((startY + index) * displayCellSize - scrollOriginY + renderOffsetY) *
-          scaleY,
-      ),
-    );
-    for (let y = startY; y < endY; y += 1) {
-      const cellTop = yEdges[y - startY];
-      const cellBottom = yEdges[y - startY + 1];
-      for (let x = startX; x < endX; x += 1) {
-        const cellLeft = xEdges[x - startX];
-        const cellRight = xEdges[x - startX + 1];
-        if (cellRight <= 0 || cellBottom <= 0) continue;
-        if (cellLeft >= canvas.width || cellTop >= canvas.height) continue;
-
-        const index = y * gridWidth + x;
-        const pixel = pixels[index];
-        const isTransparent = pixel === null || pixel === "transparent";
-        const patternColor =
-          (Math.floor(x / normalizedCheckerSize) +
-            Math.floor(y / normalizedCheckerSize)) %
-            2 === 0
-            ? TRANSPARENT_LIGHT
-            : TRANSPARENT_DARK;
-        const isPathPreviewCell = pathPreview?.has(index) ?? false;
-        const showPathPreview = previewToolEffects && isPathPreviewCell;
-        const isBucketPreviewCell = tool === "bucket" && (bucketPreview?.has(index) ?? false);
-        const isBrushPreviewCell = brushPreview?.has(index) ?? false;
-        const showHoverColor = !dimStrokePreview && !showPathPreview &&
-          (isBucketPreviewCell || isBrushPreviewCell);
-        const previewValue = showPathPreview
-          ? previewColor
-          : showHoverColor ? hoverColor : null;
-        const hasPreviewFill =
-          previewValue !== null && previewValue !== "transparent";
-        const cellBackgroundColor = showPathPreview || showHoverColor
-          ? hasPreviewFill
-            ? (previewValue as PaletteColor)
-            : patternColor
-          : isTransparent
-            ? patternColor
-            : (pixel as PaletteColor);
-
-        const opacity = dimStrokePreview &&
-          (showPathPreview || isBucketPreviewCell || isBrushPreviewCell) ? DIM_PREVIEW_OPACITY : 1;
-
-        context.globalAlpha = opacity;
-        context.fillStyle = cellBackgroundColor;
-        context.fillRect(
-          cellLeft,
-          cellTop,
-          cellRight - cellLeft,
-          cellBottom - cellTop,
-        );
-        if (brushSizePreview?.has(index)) {
-          context.globalAlpha = 1;
-          context.fillStyle = "rgba(24, 24, 27, 0.55)";
-          context.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
-          context.fillStyle = "rgba(255, 255, 255, 0.8)";
-          const edge = Math.max(1, Math.round(Math.min(scaleX, scaleY)));
-          if (!brushSizePreview.has(index - gridWidth)) {
-            context.fillRect(cellLeft, cellTop, cellRight - cellLeft, edge);
-          }
-          if (!brushSizePreview.has(index + gridWidth)) {
-            context.fillRect(cellLeft, cellBottom - edge, cellRight - cellLeft, edge);
-          }
-          if (!brushSizePreview.has(index - 1) || x === 0) {
-            context.fillRect(cellLeft, cellTop, edge, cellBottom - cellTop);
-          }
-          if (!brushSizePreview.has(index + 1) || x === gridWidth - 1) {
-            context.fillRect(cellRight - edge, cellTop, edge, cellBottom - cellTop);
-          }
+      if (visible) {
+        drawOverlay(context, grid, view, visible, getOverlayFrame(), checkerSize);
+        if (showPixelGrid) {
+          drawGridLines(context, grid, view, visible, viewportWidth, viewportHeight);
         }
       }
-    }
-
-    context.globalAlpha = 1;
-
-    if (showPixelGrid) {
-      context.setTransform(scaleX, 0, 0, scaleY, 0, 0);
-      context.save();
-      context.beginPath();
-      context.rect(renderOffsetX - scrollOriginX, renderOffsetY - scrollOriginY, contentWidth, contentHeight);
-      context.clip();
-      context.strokeStyle = "rgba(228, 228, 231, 0.8)";
-      context.lineWidth = 1;
-      for (let column = startX; column <= endX; column += 1) {
-        const x =
-          column * displayCellSize - scrollOriginX + renderOffsetX + 0.5;
-        context.beginPath();
-        context.moveTo(x, 0);
-        context.lineTo(x, viewportHeight);
-        context.stroke();
+      if (selectionOverlay?.isFloating) {
+        drawFloatingSelection(context, selectionOverlay, view, visible);
       }
-      for (let row = startY; row <= endY; row += 1) {
-        const y =
-          row * displayCellSize - scrollOriginY + renderOffsetY + 0.5;
-        context.beginPath();
-        context.moveTo(0, y);
-        context.lineTo(viewportWidth, y);
-        context.stroke();
-      }
-      context.restore();
-    }
+    };
+    drawRef.current = draw;
+    draw();
   }, [
-    activeColor,
-    brushPreview,
-    brushSizePreview,
-    bucketPreview,
-    canvasScroll.x,
-    canvasScroll.y,
-    contentHeight,
-    contentWidth,
+    checkerSize,
+    composite,
+    compositeDirtyRef,
+    compositeVersion,
     displayCellSize,
-    drawValueRef,
+    getOverlayFrame,
     gridHeight,
     gridWidth,
-    pathPreview,
-    pixels,
-    previewToolEffects,
-    dimStrokePreview,
-    showPixelGrid,
-    tool,
-    viewport.height,
     renderOffsetX,
     renderOffsetY,
     scrollOriginX,
     scrollOriginY,
+    selectionOverlay,
+    selectionPreviewRect,
+    showPixelGrid,
+    viewport.height,
     viewport.width,
-    checkerSize,
-    drawValueVersion,
   ]);
+
+  const subscribeRedraw = redraw.subscribe;
+  useEffect(() => subscribeRedraw(() => drawRef.current()), [subscribeRedraw]);
 
   const resolveCellIndexFromPoint = useCallback(
     (clientX: number, clientY: number, options?: { clamp?: boolean }) => {
@@ -871,47 +820,14 @@ export function PixelGrid({
 
       {(selectionPreviewRect || selectionOverlay) && (
         <div className="pointer-events-none absolute inset-0">
-          {selectionPreviewRect && (
+          {previewStyle && (
             <div
               className="selection-border selection-border--solid selection-border--preview selection-border--no-fill"
-              style={getSelectionStyle(selectionPreviewRect)}
+              style={previewStyle}
             />
           )}
-          {selectionOverlay && (
-            <>
-              <div
-                className="selection-border selection-border--solid"
-                style={getSelectionStyle(selectionOverlay.rect, selectionOverlay.offset)}
-              />
-              {selectionOverlay.isFloating &&
-                selectionOverlay.pixels.map((pixel, idx) => {
-                  if (pixel.color === null) return null;
-                  const absX =
-                    selectionOverlay.rect.x + selectionOverlay.offset.dx + pixel.relX;
-                  const absY =
-                    selectionOverlay.rect.y + selectionOverlay.offset.dy + pixel.relY;
-                  const left =
-                    absX * displayCellSize - scrollOriginX + renderOffsetX;
-                  const top =
-                    absY * displayCellSize - scrollOriginY + renderOffsetY;
-                  const isTransparent = pixel.color === "transparent";
-                  return (
-                    <div
-                      key={`${absX}-${absY}-${idx}`}
-                      className="selection-floating-pixel"
-                      style={{
-                        left,
-                        top,
-                        width: displayCellSize,
-                        height: displayCellSize,
-                        ...(isTransparent
-                          ? { backgroundColor: "transparent", ...checkerboardStyle(6, "rgba(0,0,0,0.2)") }
-                          : { backgroundColor: pixel.color }),
-                      }}
-                    />
-                  );
-                })}
-            </>
+          {overlayStyle && (
+            <div className="selection-border selection-border--solid" style={overlayStyle} />
           )}
         </div>
       )}

@@ -15,10 +15,12 @@ interface PixelPencilModalsProps {
   handleCloseSaveDialog: () => void;
   handleConfirmSave: () => void;
   exportScale: (typeof EXPORT_SCALES)[number];
+  exportScales: ReadonlyArray<(typeof EXPORT_SCALES)[number]>;
   setExportScale: Dispatch<SetStateAction<(typeof EXPORT_SCALES)[number]>>;
   exportFilename: string;
   setExportFilename: Dispatch<SetStateAction<string>>;
   previewDataUrl: string | null;
+  saveError: string | null;
   gridWidth: number;
   gridHeight: number;
   isSettingsDialogOpen: boolean;
@@ -38,10 +40,12 @@ export function PixelPencilModals({
   handleCloseSaveDialog,
   handleConfirmSave,
   exportScale,
+  exportScales,
   setExportScale,
   exportFilename,
   setExportFilename,
   previewDataUrl,
+  saveError,
   gridWidth,
   gridHeight,
   isSettingsDialogOpen,
@@ -63,6 +67,7 @@ export function PixelPencilModals({
           handleClose={handleCloseSaveDialog}
           handleConfirm={handleConfirmSave}
           confirmText="Save"
+          error={saveError}
           cancelText="Cancel"
           renderBody={() => (
             <div className="flex flex-col gap-4">
@@ -96,7 +101,7 @@ export function PixelPencilModals({
                   Export size
                 </span>
                 <div className="flex gap-2">
-                  {EXPORT_SCALES.map((scale) => {
+                  {exportScales.map((scale) => {
                     const isSelected = exportScale === scale;
                     return (
                       <button

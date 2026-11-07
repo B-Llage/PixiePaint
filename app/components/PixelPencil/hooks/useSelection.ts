@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 
+import type { PreviewMask } from "../grid-geometry";
+import type { EditLayer } from "../layer-edit";
+import { EMPTY_PIXEL, extractRect, intersectRect, type PixelBuffer } from "../pixel-buffer";
 import type { ToolId } from "../PixelPencilTools";
-import type {
-  PixelValue,
-  SelectionPixel,
-  SelectionRect,
-  SelectionState,
-} from "../PixelPencilTypes";
-import { cloneSelection } from "../pixel-operations";
+import type { Layer, SelectionRect, SelectionState } from "../PixelPencilTypes";
+import { cloneSelection, hasSelectionPixels } from "../pixel-operations";
 import { useStateWithRef } from "./useStateWithRef";
 
 type Cell = { x: number; y: number };
@@ -38,9 +36,13 @@ export type SelectionStateOptions = {
   gridWidth: number;
   gridHeight: number;
   gridRef: RefObject<HTMLCanvasElement | null>;
-  activeLayerPixelsRef: RefObject<PixelValue[]>;
-  setActiveLayerPixels: (next: SetStateAction<PixelValue[]>) => void;
-  setPathPreview: Dispatch<SetStateAction<Set<number> | null>>;
+  /** The active layer, read when a selection captures pixels. */
+  getActiveLayer: () => Layer | null;
+  /** The layer `applySelectionToLayer` writes to. */
+  activeLayerId: string;
+  /** Writes to a layer through the editor, which records history and recomposites. */
+  editLayer: EditLayer;
+  setPathPreview: (next: PreviewMask | null) => void;
 };
 
 export type SelectionStateApi = {
@@ -53,9 +55,15 @@ export type SelectionStateApi = {
   normalizeSelectionRect: (start: Cell, end: Cell) => SelectionRect;
   selectionContainsCell: (sel: SelectionState, cellX: number, cellY: number) => boolean;
   clampSelectionOffset: (rect: SelectionRect, desired: Offset) => Offset;
-  /** Copies the non-empty pixels under `rect` from `source` (the active layer by default). */
-  captureSelectionPixels: (rect: SelectionRect, source?: PixelValue[]) => SelectionPixel[];
-  /** Writes (`apply`) or erases (`clear`) the selection's pixels on the active layer at `offset`. */
+  /**
+   * Copies the cells under `rect` from `source` (the active layer by default) as `rect.width *
+   * rect.height` row-major values. Cells outside the grid come back empty.
+   */
+  captureSelectionPixels: (rect: SelectionRect, source?: PixelBuffer) => Uint32Array;
+  /**
+   * Writes (`apply`) or erases (`clear`) the selection's non-empty cells on the active layer at
+   * `offset`, in one `editLayer` call bounded by the shifted rect clipped to the grid.
+   */
   applySelectionToLayer: (target: SelectionState, offset: Offset, mode: "apply" | "clear") => void;
   clearSelectionState: () => void;
   releaseSelectionPointerCapture: (pointerId?: number | null) => void;
@@ -75,8 +83,9 @@ export function useSelectionState({
   gridWidth,
   gridHeight,
   gridRef,
-  activeLayerPixelsRef,
-  setActiveLayerPixels,
+  getActiveLayer,
+  activeLayerId,
+  editLayer,
   setPathPreview,
 }: SelectionStateOptions): SelectionStateApi {
   const [selection, setSelection, selectionRef] = useStateWithRef<SelectionState | null>(null);
@@ -150,55 +159,63 @@ export function useSelectionState({
     [gridHeight, gridWidth],
   );
 
-  const coordsToIndex = useCallback(
-    (x: number, y: number) => y * gridWidth + x,
-    [gridWidth],
-  );
-
-  const isInBounds = useCallback(
-    (x: number, y: number) => x >= 0 && x < gridWidth && y >= 0 && y < gridHeight,
-    [gridHeight, gridWidth],
-  );
-
   const captureSelectionPixels = useCallback(
-    (rect: SelectionRect, source = activeLayerPixelsRef.current): SelectionPixel[] => {
-      const result: SelectionPixel[] = [];
-      for (let relY = 0; relY < rect.height; relY += 1) {
-        for (let relX = 0; relX < rect.width; relX += 1) {
-          const absX = rect.x + relX;
-          const absY = rect.y + relY;
-          if (!isInBounds(absX, absY)) continue;
-          const index = coordsToIndex(absX, absY);
-          const color = source[index];
-          if (color === null) continue;
-          result.push({ relX, relY, color });
-        }
+    (rect: SelectionRect, source?: PixelBuffer): Uint32Array => {
+      const buffer = source ?? getActiveLayer()?.pixels;
+      const result = new Uint32Array(rect.width * rect.height);
+      if (!buffer) return result;
+      const inside = intersectRect(rect, { x: 0, y: 0, width: buffer.width, height: buffer.height });
+      if (!inside) return result;
+      const isWholeRect = inside.width === rect.width && inside.height === rect.height;
+      if (isWholeRect) return extractRect(buffer, rect);
+      const clipped = extractRect(buffer, inside);
+      for (let row = 0; row < inside.height; row += 1) {
+        result.set(
+          clipped.subarray(row * inside.width, (row + 1) * inside.width),
+          (inside.y - rect.y + row) * rect.width + (inside.x - rect.x),
+        );
       }
       return result;
     },
-    [activeLayerPixelsRef, coordsToIndex, isInBounds],
+    [getActiveLayer],
   );
 
   const applySelectionToLayer = useCallback(
     (target: SelectionState, offset: Offset, mode: "apply" | "clear") => {
-      if (!target.pixels.length) return;
-      setActiveLayerPixels((prev) => {
-        const next = [...prev];
-        let changed = false;
-        for (const pixel of target.pixels) {
-          const targetX = target.rect.x + pixel.relX + offset.dx;
-          const targetY = target.rect.y + pixel.relY + offset.dy;
-          if (!isInBounds(targetX, targetY)) continue;
-          const index = coordsToIndex(targetX, targetY);
-          const nextValue = mode === "clear" ? null : pixel.color;
-          if (next[index] === nextValue) continue;
-          next[index] = nextValue;
-          changed = true;
+      if (!hasSelectionPixels(target)) return;
+      const left = target.rect.x + offset.dx;
+      const top = target.rect.y + offset.dy;
+      const rect = intersectRect(
+        { x: left, y: top, width: target.rect.width, height: target.rect.height },
+        { x: 0, y: 0, width: gridWidth, height: gridHeight },
+      );
+      if (!rect) return;
+      editLayer(activeLayerId, rect, (buffer) => {
+        const { data } = buffer;
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (let y = rect.y; y < rect.y + rect.height; y += 1) {
+          const sourceRow = (y - top) * target.rect.width - left;
+          for (let x = rect.x; x < rect.x + rect.width; x += 1) {
+            const value = target.data[sourceRow + x];
+            if (value === EMPTY_PIXEL) continue;
+            const nextValue = mode === "clear" ? EMPTY_PIXEL : value;
+            const index = y * buffer.width + x;
+            if (data[index] === nextValue) continue;
+            data[index] = nextValue;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
         }
-        return changed ? next : prev;
+        if (maxX < minX) return null;
+        return { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
       });
     },
-    [coordsToIndex, isInBounds, setActiveLayerPixels],
+    [activeLayerId, editLayer, gridHeight, gridWidth],
   );
 
   const clearSelectionState = useCallback(() => {
@@ -291,7 +308,7 @@ export type SelectionGesturesOptions = {
   gridHeight: number;
   /** The grid's wrapper; a pointer-down outside it cancels the selection. */
   gridWrapperRef: RefObject<HTMLDivElement | null>;
-  setPathPreview: Dispatch<SetStateAction<Set<number> | null>>;
+  setPathPreview: (next: PreviewMask | null) => void;
   /** Converts a client point to a clamped grid cell, or null when the canvas is not ready. */
   resolvePointerFromClientPoint: (
     clientX: number,
@@ -407,11 +424,11 @@ export function useSelectionGestures({
       width: gridWidth,
       height: gridHeight,
     };
-    const pixels = captureSelectionPixels(rect);
+    const data = captureSelectionPixels(rect);
     setSelection({
       rect,
       offset: { dx: 0, dy: 0 },
-      pixels,
+      data,
       isFloating: false,
     });
     setSelectionPreviewRect(null);
@@ -421,11 +438,12 @@ export function useSelectionGestures({
   const deleteSelection = useCallback(() => {
     const current = selectionRef.current;
     if (!current) return;
-    if (!current.isFloating && current.pixels.length) {
+    const hasPixels = hasSelectionPixels(current);
+    if (!current.isFloating && hasPixels) {
       beginAction();
       applySelectionToLayer(current, current.offset, "clear");
       finalizeAction();
-    } else if (current.isFloating && current.pixels.length) {
+    } else if (current.isFloating && hasPixels) {
       beginAction();
       finalizeAction();
     }
@@ -451,7 +469,7 @@ export function useSelectionGestures({
           pointer: { x: cellX, y: cellY },
           startOffset: activeSelection.offset,
         };
-        if (activeSelection.pixels.length) {
+        if (hasSelectionPixels(activeSelection)) {
           beginAction();
           gesture.actionActive = true;
           if (!activeSelection.isFloating) {
@@ -557,11 +575,11 @@ export function useSelectionGestures({
         if (gesture.cancelClick) {
           gesture.cancelClick = false;
         } else {
-          const pixels = captureSelectionPixels(rect);
+          const data = captureSelectionPixels(rect);
           setSelection({
             rect,
             offset: { dx: 0, dy: 0 },
-            pixels,
+            data,
             isFloating: false,
           });
         }
