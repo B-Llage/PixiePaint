@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { RefObject, SetStateAction } from "react";
 
 import { getPanBounds, includePanOffset } from "../canvas-pan";
+import { clampZoomScale, getFitZoomScale, getNextZoomScale } from "../canvas-zoom";
 import {
   MAX_ZOOM_SCALE,
   MIN_CELL_SIZE_DESKTOP,
@@ -25,7 +26,10 @@ export type CanvasViewportOptions = {
 };
 
 export type CanvasViewport = {
+  /** The zoom in effect, never below the scale that fits the whole artwork. */
   zoomScale: number;
+  /** The scale at which the whole artwork fits the viewport; at most 1. */
+  minZoomScale: number;
   availableWidth: number;
   availableHeight: number;
   /** The viewport's size as reported by the grid. */
@@ -55,7 +59,11 @@ export type CanvasViewport = {
     clientY: number,
     options?: { clamp?: boolean },
   ) => ViewportPoint | null;
-  /** Zooms by whole steps, keeping the artwork point under the client point in place. */
+  /**
+   * Zooms by whole steps above 1x and halvings below it, down to the fit
+   * scale, keeping the artwork point under the client point in place. Reaching
+   * the fit scale centers the artwork instead.
+   */
   zoomAtClientPoint: (direction: ZoomDirection, steps: number, clientX: number, clientY: number) => void;
   handleWheelZoom: (direction: ZoomDirection, steps: number, point: ViewportPoint) => void;
 };
@@ -122,9 +130,19 @@ export function useCanvasViewport({
     gridWidth,
     isMobile,
   ]);
+  // The smallest zoom shows the whole artwork, however large the grid or
+  // narrow the viewport. A stored scale below a newly larger fit is raised.
+  const minZoomScale = getFitZoomScale(
+    gridWidth,
+    gridHeight,
+    canvasViewport.width,
+    canvasViewport.height,
+    baseCellSize,
+  );
+  const effectiveZoomScale = clampZoomScale(zoomScale, minZoomScale, MAX_ZOOM_SCALE);
   const displayCellSize = useMemo(
-    () => baseCellSize * zoomScale,
-    [baseCellSize, zoomScale],
+    () => baseCellSize * effectiveZoomScale,
+    [baseCellSize, effectiveZoomScale],
   );
   const contentWidth = gridWidth * displayCellSize;
   const contentHeight = gridHeight * displayCellSize;
@@ -253,11 +271,22 @@ export function useCanvasViewport({
 
   const zoomAtClientPoint = useCallback(
     (direction: ZoomDirection, steps: number, clientX: number, clientY: number) => {
-      const nextScale = Math.min(
+      const nextScale = getNextZoomScale(
+        effectiveZoomScale,
+        direction,
+        steps,
+        minZoomScale,
         MAX_ZOOM_SCALE,
-        Math.max(1, zoomScale + (direction === "in" ? steps : -steps)),
       );
-      if (nextScale === zoomScale || !gridRef.current || displayCellSize <= 0) return;
+      if (nextScale === effectiveZoomScale || !gridRef.current || displayCellSize <= 0) return;
+      if (nextScale < 1 && nextScale === minZoomScale) {
+        // The fit zoom exists to show the whole artwork, so center it rather
+        // than keep the cursor anchor, which could push an edge out of view.
+        setZoomScale(nextScale);
+        setPanExceptionKey(null);
+        setStoredScroll({ x: 0, y: 0 });
+        return;
+      }
       const position = resolvePositionFromClientPoint(clientX, clientY, { clamp: true });
       if (!position) return;
       const rect = gridRef.current.getBoundingClientRect();
@@ -287,12 +316,13 @@ export function useCanvasViewport({
       canvasViewport.height,
       canvasViewport.width,
       displayCellSize,
+      effectiveZoomScale,
       gridHeight,
       gridRef,
       gridWidth,
+      minZoomScale,
       panKey,
       resolvePositionFromClientPoint,
-      zoomScale,
     ],
   );
 
@@ -304,7 +334,8 @@ export function useCanvasViewport({
   );
 
   return {
-    zoomScale,
+    zoomScale: effectiveZoomScale,
+    minZoomScale,
     availableWidth,
     availableHeight,
     canvasViewport,
